@@ -176,22 +176,45 @@ analytic answer to ~1e-7 relative. Comparisons against *trimesh* are exact,
 because both sides start from the same float32 vertices; comparisons against a
 closed form need `rtol=1e-6`.
 
-### Where the 25 minutes went
+### `--merge-coplanar` buys almost nothing on the G1
 
-From `report.json` on the first complete G1 run:
+393,314 faces become 392,955: **0.09%**. The G1's visual meshes are organic,
+curved surfaces with almost no coplanar neighbours to merge. On boxy geometry
+it works exactly as intended -- the test fixture's 12-triangle box collapses to
+6 planar faces -- but it is not a route to a smaller G1 file. Only
+`--decimate` or `--geoms collision` move that. It is still worth leaving on:
+it costs little and it makes flat faces selectable in CAD where they exist.
 
-| phase | seconds | share |
+### Multi-component meshes are the rule, not the exception
+
+16 of the G1's 35 visual parts are several disconnected pieces, the torso being
+22. Only four showed up as *volume* errors, because the rest are also
+non-watertight and were exported as shells, where treating several pieces as
+one shell produces no measurable discrepancy -- it was still wrong, just
+invisible.
+
+### Where the time went
+
+From `report.json`, before and after parallelising the mesh build:
+
+| phase | before | after |
 |---|---|---|
-| build (mesh -> B-rep) | 522 | 48% |
-| write `assembly.step` | 222 | 21% |
-| write `parts/` | 195 | 18% |
-| `preview.glb` | 139 | 13% |
+| build (mesh -> B-rep) | 522 s | **65 s** |
+| write `assembly.step` | 222 s | 204 s |
+| write `parts/` | 195 s | 158 s |
+| `preview.glb` | 139 s | 144 s |
+| whole export, wall | 25 m 10 s | **15 m 51 s** |
 
-The build is 35 independent meshes on one of four cores, so `--jobs` now runs
-them in a process pool. `TopoDS_Shape` cannot be pickled, so workers return a
-`.brep` file; that round trip preserves topology exactly and geometry to within
-a couple of ULP (it is a decimal text format), and a test asserts the parallel
-and serial paths agree to 1e-12 relative.
+The build is 35 independent meshes and was running on one of four cores, so
+`--jobs` now runs them in a process pool. `TopoDS_Shape` cannot be pickled, so
+workers return a `.brep` file; that round trip preserves topology exactly and
+geometry to within a couple of ULP (it is a decimal text format), and a test
+asserts the parallel and serial paths agree to 1e-12 relative. The 8x speedup
+beats the 4 cores available because the old figure also included ShapeFix
+thrashing on the multi-component solids it could not represent.
+
+Writing and reading STEP is now 2/3 of the export, and that is a property of
+putting 393k triangles into a text format, not something more cores will fix.
 
 ## Bugs found while building
 
@@ -204,6 +227,13 @@ leaves-first.
 sub-assemblies came back named `29`, `34`, `57`. The name we wrote is on the
 *referred* (prototype) label; leaf parts happen to carry it on both. The reader
 prefers the referred label.
+
+**A model's offscreen render buffer caps `mujoco.Renderer`.** It defaults to
+640x480 unless the MJCF says otherwise, and the renderer refuses any larger
+size. `humanoid.xml` asks for 2560x1440, so the visual check worked there and
+silently skipped on the G1, which asks for nothing. `render.py` now raises the
+buffer to fit the requested size. The mesh test fixture also declares nothing,
+so it covers this.
 
 **OpenCascade's STEP unit setting is global and leaks.** `exportAssembly(...,
 unit="M")` sets `xstep.cascade.unit` and never restores it, so a millimetre

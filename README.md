@@ -81,6 +81,11 @@ order worth trying:
 | `--geoms collision` | the simplified collision set (219k triangles for the G1) rather than the detailed visual art |
 | `--only LINK[,LINK]` | one link and its ancestors, when you only need somewhere to bolt to |
 
+`--merge-coplanar` is on by default and is *not* one of these levers: the G1's
+visual meshes are organic surfaces with almost no coplanar neighbours, so it
+removes 0.09% of the faces. It earns its keep on boxy geometry, where it turns
+a triangulated panel back into one flat face you can click on.
+
 The default is full-fidelity `visual` geometry, because the point of this tool
 is that the dimensions are right.
 
@@ -95,7 +100,11 @@ Every export runs the full check suite and writes the numbers into
 - `joints.json` anchors and axes replay MuJoCo's kinematics to **< 1e-6 m**:
   drive a real joint 0.5 rad in the sim, rotate the child link about our
   recorded anchor and axis, and it lands in the same place;
-- the coplanar merge changes no volume.
+- the coplanar merge changes no volume (**3.5e-14** relative on the G1).
+
+A full G1 export takes about 16 minutes and produces roughly a gigabyte of
+STEP; see **Output size** above. Mesh conversion runs one process per core by
+default (`--jobs`).
 
 Measurements are taken by re-opening the written `assembly.step`, so the frame
 maths, the STEP write and the STEP read are all inside the loop being tested.

@@ -80,6 +80,15 @@ def _render_mujoco(lm, views, width, height, lookat, distance, fovy, groups=None
     """
     import mujoco
 
+    # A model's offscreen buffer defaults to 640x480 unless its MJCF says
+    # otherwise, and mujoco.Renderer refuses any size larger than that.
+    # humanoid.xml happens to ask for 2560x1440, the G1 says nothing, so the
+    # same request succeeded on one and failed on the other.  Raise the
+    # buffer to fit what we are about to ask for.
+    visual = lm.model.vis.global_
+    visual.offwidth = max(int(visual.offwidth), int(width))
+    visual.offheight = max(int(visual.offheight), int(height))
+
     try:
         renderer = mujoco.Renderer(lm.model, height, width)
     except Exception as exc:  # pragma: no cover - no GL

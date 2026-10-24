@@ -86,3 +86,22 @@ def test_comparison_images(humanoid_export):
             occupied_left.sum(), occupied_right.sum()
         )
         assert overlap > 0.85, f"silhouette rows only {overlap:.0%} in common"
+
+
+def test_renders_a_model_that_declares_no_offscreen_buffer(mesh_export):
+    """A model's offscreen buffer defaults to 640x480 and caps the renderer.
+
+    humanoid.xml asks for 2560x1440 in its MJCF, so it hid this; the G1 says
+    nothing and the default comparison size (480 wide, 640 high) exceeded the
+    480-pixel default height.  The mesh fixture also declares nothing, so it
+    reproduces the failure.
+    """
+    model = mesh_export.lm.model
+    assert int(model.vis.global_.offheight) < 640, "fixture should use the default buffer"
+
+    images = render_comparison(mesh_export, width=480, height=640)
+    if images is None:
+        pytest.skip("no offscreen GL context available for MuJoCo rendering")
+    assert len(images) == len(DEFAULT_VIEWS)
+    for path in images.values():
+        assert path.exists()
