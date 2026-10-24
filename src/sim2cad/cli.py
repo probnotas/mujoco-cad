@@ -48,6 +48,9 @@ def export(
     out: Optional[str] = typer.Option(None, help="Output directory."),
     parts: bool = typer.Option(True, "--parts/--no-parts", help="Write per-link STEP and STL."),
     preview: bool = typer.Option(True, "--preview/--no-preview", help="Write preview.glb."),
+    render: bool = typer.Option(
+        True, "--render/--no-render", help="Write side-by-side sim-vs-CAD PNGs (needs offscreen GL)."
+    ),
     validate_after: bool = typer.Option(
         True, "--validate/--no-validate", help="Run the §8 checks and write the report."
     ),
@@ -87,6 +90,7 @@ def export(
             out=out,
             write_parts=parts,
             write_preview=preview,
+            write_render=render,
             progress=report,
         )
 
@@ -104,6 +108,10 @@ def export(
     if result.part_paths:
         console.print(f"  parts/         {len(result.part_paths)} STEP + {len(result.stl_paths)} STL")
     console.print(f"  joints.json    {len(result.robot.nodes)} bodies")
+    if result.render_paths:
+        console.print(f"  compare_*.png  {len(result.render_paths)} views")
+    elif result.render_skipped_because:
+        console.print(f"  [yellow]no render[/] {result.render_skipped_because}")
     for warning in result.warnings[:6]:
         console.print(f"  [yellow]note[/] {warning}")
 
@@ -198,14 +206,19 @@ def validate(
         raise typer.BadParameter(f"{report_path} not found; re-run `sim2cad export` first")
     previous = json.loads(report_path.read_text())
 
-    console.print(f"re-exporting [bold]{previous['robot']}[/] from {previous['source']} to compare")
-    result = run_export(
-        mjcf=previous["source"],
-        geoms=previous["geoms"],
-        pose=_pose_spec(previous["pose"]),
-        units=previous["units"],
-        out=str(path),
+    options = previous.get("options") or {}
+    if not options:
+        # Reports from before options were recorded: fall back to the source.
+        options = {
+            "mjcf": previous["source"],
+            "geoms": previous["geoms"],
+            "pose": _pose_spec(previous["pose"]),
+            "units": previous["units"],
+        }
+    console.print(
+        f"re-exporting [bold]{previous['robot']}[/] from {previous['source']} to compare"
     )
+    result = run_export(out=str(path), **options)
     report_obj = validate_export(result)
     write_reports(report_obj, path)
     _print_checks(report_obj)

@@ -16,6 +16,7 @@ from .frames import Pose
 from .geoms import GeomSelection, geom_local_points, select_geoms
 from .joints import joints_document
 from .load import LoadedModel, apply_pose, ground_world_fix, load_model, set_world_fix
+from .occunits import cascade_unit
 
 __all__ = ["ExportResult", "run_export", "UNIT_SCALE", "write_step_assembly"]
 
@@ -35,10 +36,15 @@ class ExportResult:
     stl_paths: dict[str, Path] = field(default_factory=dict)
     joints_path: Path | None = None
     preview_path: Path | None = None
+    render_paths: dict[str, Path] = field(default_factory=dict)
+    render_skipped_because: str | None = None
     units: str = "mm"
     scale: float = 1000.0
     timings: dict[str, float] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    #: The arguments this export was run with, so `sim2cad validate` can
+    #: reproduce it exactly rather than guessing at the defaults.
+    options: dict = field(default_factory=dict)
 
 
 def _lowest_z(lm: LoadedModel, selection: GeomSelection) -> float:
@@ -53,9 +59,9 @@ def _lowest_z(lm: LoadedModel, selection: GeomSelection) -> float:
 
 def write_step_assembly(robot: RobotAssembly, path: Path) -> None:
     """Write the nested assembly, declaring the unit the geometry is in."""
-    exportAssembly(
-        robot.assembly, str(path), mode="default", unit=_STEP_UNIT[robot.units]
-    )
+    unit = _STEP_UNIT[robot.units]
+    with cascade_unit(unit):
+        exportAssembly(robot.assembly, str(path), mode="default", unit=unit)
 
 
 def _tessellate(shape: cq.Shape, tolerance: float) -> tuple[np.ndarray, np.ndarray]:
@@ -112,7 +118,9 @@ def write_part_files(
                 color=cq.Color(*part.rgba),
             )
         step_path = parts_dir / f"{node.safe_name}.step"
-        exportAssembly(sub, str(step_path), mode="default", unit=_STEP_UNIT[result.units])
+        unit = _STEP_UNIT[result.units]
+        with cascade_unit(unit):
+            exportAssembly(sub, str(step_path), mode="default", unit=unit)
         result.part_paths[node.name] = step_path
 
         if write_stl:
@@ -136,10 +144,11 @@ def run_export(
     joint_markers: bool = True,
     ground: bool = False,
     keep_root_pose: bool = False,
-    only: list[str] | None = None,
+    only: list[str] | str | None = None,
     out: str | Path | None = None,
     write_parts: bool = True,
     write_preview: bool = True,
+    write_render: bool = True,
     progress=None,
 ) -> ExportResult:
     """Run the whole pipeline and write everything into ``out``."""
@@ -191,6 +200,20 @@ def run_export(
         units=units,
         scale=scale,
         timings=timings,
+        options={
+            "menagerie": menagerie,
+            "mjcf": str(mjcf) if mjcf else None,
+            "entry": entry,
+            "geoms": geoms,
+            "pose": pose,
+            "units": units,
+            "decimate": decimate,
+            "merge_coplanar": merge_coplanar,
+            "joint_markers": joint_markers,
+            "ground": ground,
+            "keep_root_pose": keep_root_pose,
+            "only": only,
+        },
     )
     result.warnings.extend(robot.notes)
     if selection.fallbacks:
@@ -224,5 +247,21 @@ def run_export(
             result.warnings.append(f"preview.glb failed: {type(exc).__name__}: {exc}")
             result.preview_path = None
         timings["preview"] = time.perf_counter() - t0
+
+    if write_render and result.preview_path is not None:
+        t0 = step("rendering comparison images")
+        try:
+            from .render import render_comparison
+
+            images = render_comparison(result)
+            if images is None:
+                result.render_skipped_because = "no offscreen GL context available"
+            else:
+                result.render_paths = images
+        except Exception as exc:  # pragma: no cover - rendering is best effort
+            result.render_skipped_because = f"{type(exc).__name__}: {exc}"
+        timings["render"] = time.perf_counter() - t0
+    elif write_render:
+        result.render_skipped_because = "no preview.glb to compare against"
 
     return result

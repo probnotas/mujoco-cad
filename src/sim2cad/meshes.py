@@ -41,7 +41,7 @@ from OCP.BRepBuilderAPI import (
 )
 from OCP.BRepCheck import BRepCheck_Analyzer
 from OCP.gp import gp_Dir, gp_Pln, gp_Pnt
-from OCP.ShapeFix import ShapeFix_Shape, ShapeFix_Shell, ShapeFix_Solid
+from OCP.ShapeFix import ShapeFix_Shape
 from OCP.TopoDS import TopoDS, TopoDS_Shape, TopoDS_Shell
 
 from .geoms import unify_same_domain
@@ -227,17 +227,18 @@ def mesh_to_shape(mesh: MeshData, merge_coplanar: bool = True) -> MeshBuildResul
     shape: TopoDS_Shape = shell
     is_solid = False
     if mesh.watertight:
+        # The shell is already sewn and manifold by construction, so
+        # ShapeFix_Shell and ShapeFix_Solid have nothing to find -- and on a
+        # 45k-triangle mesh they cost about 37 seconds between them.  Build the
+        # solid directly and only reach for ShapeFix if the check below fails.
         shell.Closed(True)
-        fixer = ShapeFix_Shell(shell)
-        fixer.Perform()
-        fixed_shell = fixer.Shell() if fixer.NbShells() == 1 else shell
-        maker = BRepBuilderAPI_MakeSolid(fixed_shell)
+        maker = BRepBuilderAPI_MakeSolid(shell)
         if maker.IsDone():
             solid = maker.Solid()
-            solid_fix = ShapeFix_Solid(solid)
-            solid_fix.Perform()
-            fixed = solid_fix.Solid()
-            shape = fixed if not fixed.IsNull() else solid
+            if _volume(solid) < 0.0:
+                # Inward-facing shell: flip it rather than run a repair pass.
+                solid = TopoDS.Solid_s(solid.Reversed())
+            shape = solid
             is_solid = True
         else:
             notes.append("MakeSolid failed; exported as an open shell")
@@ -265,6 +266,8 @@ def mesh_to_shape(mesh: MeshData, merge_coplanar: bool = True) -> MeshBuildResul
         if not fixed.IsNull() and BRepCheck_Analyzer(fixed).IsValid():
             shape = fixed
             valid = True
+            if is_solid:
+                volume_after = _volume(shape)
             notes.append("ShapeFix repaired non-manifold edges")
     return MeshBuildResult(
         shape=shape,

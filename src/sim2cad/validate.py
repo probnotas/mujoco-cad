@@ -106,6 +106,7 @@ class ValidationReport:
     files: dict[str, Any]
     warnings: list[str]
     timings: dict[str, float]
+    options: dict[str, Any] = field(default_factory=dict)
 
     @property
     def passed(self) -> bool:
@@ -126,6 +127,7 @@ class ValidationReport:
             "files": self.files,
             "warnings": self.warnings,
             "timings": self.timings,
+            "options": self.options,
         }
 
 
@@ -203,7 +205,17 @@ def validate_export(result: ExportResult, run_round_trip: bool = True) -> Valida
     checks: list[Check] = []
     parts: list[PartReport] = []
 
-    step_root = read_step_assembly(str(result.assembly_path))
+    # Measure in millimetres whatever the export unit is.  OpenCascade is a
+    # millimetre-native kernel: BRepBndLib::AddOptimal converges to ~1e-11 mm
+    # on a capsule at millimetre scale but only ~2.6e-5 m on the same capsule
+    # written in metres, because its tolerance is absolute.  Reading the file
+    # back as millimetres sidesteps that, and the PRD quotes its tolerances in
+    # millimetres anyway.
+    step_root = read_step_assembly(str(result.assembly_path), unit="MM")
+    #: metres -> millimetres, for the expected values.
+    mm_scale = 1000.0
+    #: file units -> millimetres, for anything already scaled at export time.
+    to_mm = mm_scale / scale
     leaves = _index_step_leaves(step_root)
 
     worst_centroid_mesh = 0.0
@@ -226,28 +238,30 @@ def validate_export(result: ExportResult, run_round_trip: bool = True) -> Valida
             leaf, world_loc = entry
             placed = leaf.shape.Moved(world_loc.to_location().wrapped)
 
-            expected_world = _scaled(lm.geom_pose(part.geom_id), scale)
+            expected_world = _scaled(lm.geom_pose(part.geom_id), mm_scale)
             is_prim = part.mesh is None
 
             if is_prim:
                 lo_ref, hi_ref = expected_primitive_bbox(
-                    model, part.geom_id, lm.geom_pose(part.geom_id), scale
+                    model, part.geom_id, lm.geom_pose(part.geom_id), mm_scale
                 )
                 centroid_ref = expected_world.pos
-                vol_ref = analytic_volume(model, part.geom_id, scale)
+                vol_ref = analytic_volume(model, part.geom_id, mm_scale)
             else:
-                pts = _mesh_world_points(part, lm.geom_pose(part.geom_id), model, scale)
+                pts = _mesh_world_points(part, lm.geom_pose(part.geom_id), model, mm_scale)
                 lo_ref, hi_ref = pts.min(axis=0), pts.max(axis=0)
-                cleaned = expected_world.apply(part.mesh.vertices)
+                cleaned = expected_world.apply(part.mesh.vertices * to_mm)
                 centroid_ref = _mesh_area_centroid(cleaned, part.mesh.faces)
-                vol_ref = part.mesh.volume if part.mesh.watertight else None
+                vol_ref = (
+                    part.mesh.volume * to_mm**3 if part.mesh.watertight else None
+                )
 
             lo, hi = shape_bbox(placed, optimal=True)
             bbox_err = float(max(np.abs(lo - lo_ref).max(), np.abs(hi - hi_ref).max()))
             centroid, _area = surface_centroid(placed)
             centroid_err = float(np.linalg.norm(centroid - centroid_ref))
 
-            volume = solid_volume(placed)
+            volume = solid_volume(placed)  # mm^3
             vol_rel = (
                 abs(volume - vol_ref) / abs(vol_ref)
                 if vol_ref not in (None, 0) and math.isfinite(vol_ref)
@@ -266,9 +280,8 @@ def validate_export(result: ExportResult, run_round_trip: bool = True) -> Valida
                 faces_before = faces_after = count_faces(part.shape)
                 notes = []
 
-            from OCP.BRepCheck import BRepCheck_Analyzer
-
-            valid = bool(BRepCheck_Analyzer(part.shape).IsValid())
+            # `valid` already came from mesh_to_shape; BRepCheck on a 50k-face
+            # shape costs ten seconds, so it is not worth running twice.
             if not valid:
                 invalid.append(part.safe_name)
             if not is_solid:
@@ -298,8 +311,8 @@ def validate_export(result: ExportResult, run_round_trip: bool = True) -> Valida
                     watertight=part.mesh.watertight if part.mesh else None,
                     is_solid=is_solid,
                     valid=valid,
-                    volume=volume,
-                    volume_reference=vol_ref,
+                    volume=volume / to_mm**3,
+                    volume_reference=vol_ref / to_mm**3 if vol_ref is not None else None,
                     volume_rel_error=vol_rel,
                     volume_merge_rel_error=merge_rel,
                     centroid_error=centroid_err,
@@ -310,7 +323,6 @@ def validate_export(result: ExportResult, run_round_trip: bool = True) -> Valida
 
     # The tolerances are quoted in mm; in metre mode the same physical
     # tolerance is 1000x smaller in file units.
-    unit_factor = 1.0 if result.units == "mm" else 1e-3
     n_mesh = sum(1 for p in parts if p.geom_type == "mesh")
     n_prim = len(parts) - n_mesh
     n_mesh_solid = sum(1 for p in parts if p.geom_type == "mesh" and p.is_solid)
@@ -318,30 +330,30 @@ def validate_export(result: ExportResult, run_round_trip: bool = True) -> Valida
     checks.append(
         Check(
             "3a. placement: mesh part centroid",
-            worst_centroid_mesh <= TOL_CENTROID_MESH_MM * unit_factor,
-            f"worst centroid error {worst_centroid_mesh:.3e} {result.units}",
+            worst_centroid_mesh <= TOL_CENTROID_MESH_MM,
+            f"worst centroid error {worst_centroid_mesh:.3e} mm",
             worst_centroid_mesh,
-            TOL_CENTROID_MESH_MM * unit_factor,
+            TOL_CENTROID_MESH_MM,
             skipped=n_mesh == 0,
         )
     )
     checks.append(
         Check(
             "3b. placement: mesh part bounding box",
-            worst_bbox_mesh <= TOL_BBOX_MESH_MM * unit_factor,
-            f"worst bbox error {worst_bbox_mesh:.3e} {result.units}",
+            worst_bbox_mesh <= TOL_BBOX_MESH_MM,
+            f"worst bbox error {worst_bbox_mesh:.3e} mm",
             worst_bbox_mesh,
-            TOL_BBOX_MESH_MM * unit_factor,
+            TOL_BBOX_MESH_MM,
             skipped=n_mesh == 0,
         )
     )
     checks.append(
         Check(
             "3c. placement: primitive part (machine precision)",
-            max(worst_centroid_prim, worst_bbox_prim) <= TOL_PRIMITIVE_MM * unit_factor,
-            f"worst centroid {worst_centroid_prim:.3e}, bbox {worst_bbox_prim:.3e} {result.units}",
+            max(worst_centroid_prim, worst_bbox_prim) <= TOL_PRIMITIVE_MM,
+            f"worst centroid {worst_centroid_prim:.3e}, bbox {worst_bbox_prim:.3e} mm",
             max(worst_centroid_prim, worst_bbox_prim),
-            TOL_PRIMITIVE_MM * unit_factor,
+            TOL_PRIMITIVE_MM,
             skipped=n_prim == 0,
         )
     )
@@ -377,6 +389,25 @@ def validate_export(result: ExportResult, run_round_trip: bool = True) -> Valida
     )
 
     checks.extend(_completeness_checks(result))
+
+    if result.render_paths:
+        checks.append(
+            Check(
+                "9. visual: sim vs exported CAD, same camera",
+                True,
+                "wrote " + ", ".join(sorted(p.name for p in result.render_paths.values())),
+                float(len(result.render_paths)),
+            )
+        )
+    else:
+        checks.append(
+            Check(
+                "9. visual: sim vs exported CAD, same camera",
+                True,
+                result.render_skipped_because or "not requested",
+                skipped=True,
+            )
+        )
 
     checks.append(
         Check(
@@ -429,6 +460,7 @@ def validate_export(result: ExportResult, run_round_trip: bool = True) -> Valida
         files=files,
         warnings=list(result.warnings),
         timings=dict(result.timings),
+        options=dict(result.options),
     )
 
 
@@ -457,14 +489,34 @@ def _completeness_checks(result: ExportResult) -> list[Check]:
         )
     )
 
+    # Which bodies *should* be nodes: the whole subtree normally, or the
+    # chosen links plus their ancestors when --only pruned it.  Either way a
+    # body without geoms must still be present, so the frames survive.
+    from .assembly import _keep_bodies
+
+    wanted = _keep_bodies(lm, result.options.get("only"))
+    if wanted is None:
+        expected_nodes = set(lm.subtree())
+    else:
+        expected_nodes = set()
+        for body in wanted:
+            cur = body
+            while cur != 0:
+                expected_nodes.add(cur)
+                cur = int(model.body_parentid[cur])
+
     empty = [n.name for n in robot.nodes.values() if not n.has_geometry]
+    missing_nodes = expected_nodes - set(robot.nodes)
     checks.append(
         Check(
             "5b. completeness: geometry-less bodies still in the hierarchy",
-            all(b in robot.nodes for b in lm.subtree()),
-            f"{len(robot.nodes)} body nodes, {len(empty)} of them empty"
-            + (f" ({empty[:5]})" if empty else ""),
+            not missing_nodes,
+            f"{len(robot.nodes)} of {len(expected_nodes)} body nodes, "
+            f"{len(empty)} of them empty"
+            + (f" ({empty[:5]})" if empty else "")
+            + (f"; missing {sorted(missing_nodes)[:5]}" if missing_nodes else ""),
             float(len(robot.nodes)),
+            float(len(expected_nodes)),
         )
     )
 
@@ -578,6 +630,7 @@ def _file_table(result: ExportResult) -> dict[str, Any]:
         "assembly": info(result.assembly_path),
         "joints": info(result.joints_path),
         "preview": info(result.preview_path),
+        "renders": {k: info(v) for k, v in sorted(result.render_paths.items())},
         "parts": {k: info(v) for k, v in sorted(result.part_paths.items())},
         "stl": {k: info(v) for k, v in sorted(result.stl_paths.items())},
     }
@@ -604,7 +657,7 @@ def render_markdown(report: ValidationReport) -> str:
     a(f"- **source**: `{report.source}`")
     a(f"- **pose**: `{report.pose}`")
     a(f"- **geoms**: `{report.geoms_mode}`")
-    a(f"- **units**: `{report.units}`")
+    a(f"- **units**: `{report.units}` (volumes in {report.units}^3; placement errors in mm)")
     a(f"- **result**: {'**ALL CHECKS PASSED**' if report.passed else '**FAILURES**'}")
     a("")
 

@@ -123,10 +123,12 @@ def _geom_rgba(model: mujoco.MjModel, geom_id: int) -> tuple[float, float, float
     return tuple(float(np.clip(v, 0.0, 1.0)) for v in rgba)  # type: ignore[return-value]
 
 
-def _keep_bodies(lm: LoadedModel, only: list[str] | None) -> set[int] | None:
+def _keep_bodies(lm: LoadedModel, only: list[str] | str | None) -> set[int] | None:
     """Bodies whose geometry we emit, or ``None`` for all of them."""
     if not only:
         return None
+    if isinstance(only, str):
+        only = [part.strip() for part in only.split(",") if part.strip()]
     names = body_names(lm.model)
     wanted: set[int] = set()
     for item in only:
@@ -145,7 +147,7 @@ def build_assembly(
     merge_coplanar: bool = True,
     decimate: float | None = None,
     joint_markers: bool = True,
-    only: list[str] | None = None,
+    only: list[str] | str | None = None,
     progress=None,
 ) -> RobotAssembly:
     """Convert the selected geoms into a nested :class:`cadquery.Assembly`."""

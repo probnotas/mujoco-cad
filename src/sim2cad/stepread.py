@@ -26,6 +26,7 @@ from OCP.XCAFApp import XCAFApp_Application
 from OCP.XCAFDoc import XCAFDoc_DocumentTool
 
 from .frames import Pose
+from .occunits import cascade_unit
 
 __all__ = [
     "StepNode",
@@ -76,8 +77,18 @@ def _label_name(label: TDF_Label) -> str:
     return ""
 
 
-def read_step_assembly(path: str) -> StepNode:
-    """Load a STEP file into a :class:`StepNode` tree."""
+def read_step_assembly(path: str, unit: str = "MM") -> StepNode:
+    """Load a STEP file into a :class:`StepNode` tree.
+
+    ``unit`` is the length unit the caller wants the coordinates back in; it
+    must match the unit the file was written in for the numbers to come back
+    unchanged, which is what the placement checks compare against.
+    """
+    with cascade_unit(unit):
+        return _read_step_assembly(path)
+
+
+def _read_step_assembly(path: str) -> StepNode:
     reader = STEPCAFControl_Reader()
     reader.SetNameMode(True)
     reader.SetColorMode(True)
@@ -142,7 +153,11 @@ def shape_bbox(shape: TopoDS_Shape, optimal: bool = True) -> tuple[np.ndarray, n
     """
     box = Bnd_Box()
     if optimal:
-        BRepBndLib.AddOptimal_s(shape, box, True, False)
+        # useTriangulation=False: compute from the geometry itself.  With the
+        # default True, OCC reuses whatever triangulation happens to be cached
+        # on the shape, which is a visual approximation -- fine at millimetre
+        # scale, but off by 26 microns on a metre-scale sphere.
+        BRepBndLib.AddOptimal_s(shape, box, False, False)
     else:
         BRepBndLib.Add_s(shape, box, True)
     xmin, ymin, zmin, xmax, ymax, zmax = box.Get()

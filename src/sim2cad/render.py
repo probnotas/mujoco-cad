@@ -71,13 +71,26 @@ def _ensure_gl() -> None:
         os.environ["PYOPENGL_PLATFORM"] = os.environ["MUJOCO_GL"]
 
 
-def _render_mujoco(lm, views, width, height, lookat, distance, fovy):
+def _render_mujoco(lm, views, width, height, lookat, distance, fovy, groups=None):
+    """Render the sim with only the geoms we exported, and no scenery.
+
+    The floor, shadows, skybox and haze have no counterpart in a CAD assembly,
+    and they dominate the frame.  Switching them off is what turns the
+    side-by-side into a real comparison rather than two unrelated pictures.
+    """
     import mujoco
 
     try:
         renderer = mujoco.Renderer(lm.model, height, width)
     except Exception as exc:  # pragma: no cover - no GL
         raise RenderUnavailable(f"mujoco.Renderer unavailable: {exc}") from exc
+
+    option = mujoco.MjvOption()
+    # World-body geoms (the floor) are "static"; we never export those.
+    option.flags[mujoco.mjtVisFlag.mjVIS_STATIC] = 0
+    if groups is not None:
+        for g in range(len(option.geomgroup)):
+            option.geomgroup[g] = 1 if g in groups else 0
 
     images = {}
     try:
@@ -88,7 +101,14 @@ def _render_mujoco(lm, views, width, height, lookat, distance, fovy):
         for view in views:
             camera.azimuth = view.azimuth
             camera.elevation = view.elevation
-            renderer.update_scene(lm.data, camera=camera)
+            renderer.update_scene(lm.data, camera=camera, scene_option=option)
+            for flag in (
+                mujoco.mjtRndFlag.mjRND_SHADOW,
+                mujoco.mjtRndFlag.mjRND_REFLECTION,
+                mujoco.mjtRndFlag.mjRND_SKYBOX,
+                mujoco.mjtRndFlag.mjRND_HAZE,
+            ):
+                renderer.scene.flags[flag] = 0
             images[view.name] = renderer.render().copy()
     finally:
         renderer.close()
@@ -235,8 +255,13 @@ def render_comparison(
     fovy = float(model.vis.global_.fovy)
     lookat_cad = lm.world_fix.apply(lookat_sim)
 
+    groups = {
+        int(model.geom_group[g]) for g in result.selection.geom_ids
+    } or None
     try:
-        sim = _render_mujoco(lm, views, width, height, lookat_sim, distance, fovy)
+        sim = _render_mujoco(
+            lm, views, width, height, lookat_sim, distance, fovy, groups=groups
+        )
         cad = _render_glb(Path(result.preview_path), views, width, height, lookat_cad, distance, fovy)
     except RenderUnavailable:
         return None
