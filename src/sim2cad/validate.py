@@ -80,6 +80,7 @@ class PartReport:
     geom_class: str
     faces_before: int | None
     faces_after: int | None
+    n_components: int
     watertight: bool | None
     is_solid: bool
     valid: bool
@@ -274,10 +275,12 @@ def validate_export(result: ExportResult, run_round_trip: bool = True) -> Valida
             if build is not None:
                 merge_rel = _relative(build.volume_before_merge, build.volume_after_merge)
                 faces_before, faces_after = build.faces_before, build.faces_after
+                components = build.n_components
                 notes = list(build.notes)
             else:
                 merge_rel = None
                 faces_before = faces_after = count_faces(part.shape)
+                components = 1
                 notes = []
 
             # `valid` already came from mesh_to_shape; BRepCheck on a 50k-face
@@ -308,6 +311,7 @@ def validate_export(result: ExportResult, run_round_trip: bool = True) -> Valida
                     geom_class=part.geom_class,
                     faces_before=faces_before,
                     faces_after=faces_after,
+                    n_components=components,
                     watertight=part.mesh.watertight if part.mesh else None,
                     is_solid=is_solid,
                     valid=valid,
@@ -674,13 +678,14 @@ def render_markdown(report: ValidationReport) -> str:
     a("## Parts")
     a("")
     a(
-        "| body | part | type | class | faces before | faces after | watertight | solid |"
-        " valid | volume | vol rel err | merge rel err | centroid err | bbox err |"
+        "| body | part | type | class | pieces | faces before | faces after | watertight |"
+        " solid | valid | volume | vol rel err | merge rel err | centroid err | bbox err |"
     )
-    a("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    a("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for p in report.parts:
         a(
             f"| {p.body} | {p.part} | {p.geom_type} | {p.geom_class} | "
+            f"{p.n_components} | "
             f"{p.faces_before if p.faces_before is not None else '-'} | "
             f"{p.faces_after if p.faces_after is not None else '-'} | "
             f"{'-' if p.watertight is None else ('yes' if p.watertight else 'no')} | "

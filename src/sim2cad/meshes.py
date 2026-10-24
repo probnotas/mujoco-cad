@@ -22,6 +22,17 @@ connectivity -- the mesh is indexed -- so instead we build the shell
 topologically, creating each vertex once and each edge once and sharing them
 between the faces that meet there.  That is linear, and the resulting shell is
 sewn by construction.
+
+One mesh is not always one solid
+--------------------------------
+Four of the G1's visual meshes are several disconnected pieces stored in a
+single mesh -- ``left_hip_roll_link`` is two, ``right_knee_link`` is eight --
+every edge perfectly manifold, just not all joined up.  A ``TopoDS_Solid`` is
+defined as *one* outer shell plus optional inner voids, so handing it several
+disjoint outer shells produces a solid that ``BRepCheck_Analyzer`` rejects and
+whose volume STEP reads back short, because the extra shells get taken for
+cavities.  Each connected component therefore becomes its own solid, and the
+components are collected into a compound.
 """
 
 from __future__ import annotations
@@ -42,21 +53,37 @@ from OCP.BRepBuilderAPI import (
 from OCP.BRepCheck import BRepCheck_Analyzer
 from OCP.gp import gp_Dir, gp_Pln, gp_Pnt
 from OCP.ShapeFix import ShapeFix_Shape
-from OCP.TopoDS import TopoDS, TopoDS_Shape, TopoDS_Shell
+from OCP.TopoDS import TopoDS, TopoDS_Compound, TopoDS_Shape, TopoDS_Shell
 
 from .geoms import unify_same_domain
 
 __all__ = [
     "MeshData",
+    "MeshComponent",
     "extract_mesh",
     "mesh_to_shape",
     "MeshBuildResult",
+    "connected_components",
 ]
 
 
 @dataclass
+class MeshComponent:
+    """One connected piece of a mesh, reindexed to its own vertices."""
+
+    vertices: np.ndarray
+    faces: np.ndarray
+    watertight: bool
+    volume: float
+
+    @property
+    def nfaces(self) -> int:
+        return int(len(self.faces))
+
+
+@dataclass
 class MeshData:
-    """A cleaned triangle mesh in its geom's frame."""
+    """A cleaned triangle mesh in its geom's frame, split into components."""
 
     name: str
     vertices: np.ndarray
@@ -65,11 +92,64 @@ class MeshData:
     repaired: bool
     volume: float
     faces_raw: int
+    components: list[MeshComponent] = field(default_factory=list)
     decimated_to: int | None = None
 
     @property
     def nfaces(self) -> int:
         return int(len(self.faces))
+
+    @property
+    def n_components(self) -> int:
+        return len(self.components)
+
+
+def connected_components(faces: np.ndarray, n_vertices: int) -> list[np.ndarray]:
+    """Face-index arrays, one per connected piece of the mesh.
+
+    Connectivity is through shared vertices, which is what decides whether
+    OpenCascade can treat the pieces as a single shell.
+    """
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components as _cc
+
+    if len(faces) == 0:
+        return []
+    rows = faces[:, [0, 1, 2]].ravel()
+    cols = faces[:, [1, 2, 0]].ravel()
+    adjacency = coo_matrix(
+        (np.ones(len(rows), dtype=np.int8), (rows, cols)),
+        shape=(n_vertices, n_vertices),
+    )
+    count, labels = _cc(adjacency, directed=False)
+    if count == 1:
+        return [np.arange(len(faces))]
+    face_labels = labels[faces[:, 0]]
+    groups = [np.nonzero(face_labels == i)[0] for i in range(count)]
+    return [g for g in groups if len(g)]
+
+
+def _split_components(mesh: trimesh.Trimesh) -> list[MeshComponent]:
+    vertices = np.asarray(mesh.vertices, dtype=float)
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    out: list[MeshComponent] = []
+    for group in connected_components(faces, len(vertices)):
+        sub_faces = faces[group]
+        used = np.unique(sub_faces)
+        remap = np.full(len(vertices), -1, dtype=np.int64)
+        remap[used] = np.arange(len(used))
+        piece = trimesh.Trimesh(
+            vertices=vertices[used], faces=remap[sub_faces], process=False
+        )
+        out.append(
+            MeshComponent(
+                vertices=np.asarray(piece.vertices, dtype=float),
+                faces=np.asarray(piece.faces, dtype=np.int64),
+                watertight=bool(piece.is_watertight),
+                volume=float(piece.volume) if piece.is_watertight else float("nan"),
+            )
+        )
+    return out
 
 
 def extract_mesh(
@@ -129,6 +209,7 @@ def extract_mesh(
         repaired=repaired,
         volume=float(mesh.volume) if mesh.is_watertight else float("nan"),
         faces_raw=faces_raw,
+        components=_split_components(mesh),
         decimated_to=decimated_to,
     )
 
@@ -142,6 +223,7 @@ class MeshBuildResult:
     valid: bool
     faces_before: int
     faces_after: int
+    n_components: int = 1
     volume_before_merge: float = float("nan")
     volume_after_merge: float = float("nan")
     dropped_triangles: int = 0
@@ -215,68 +297,278 @@ def _count_faces(shape: TopoDS_Shape) -> int:
     return count
 
 
+def _component_shape(component: MeshComponent) -> tuple[TopoDS_Shape, bool, int]:
+    """One connected piece as a solid if it is closed, else as an open shell."""
+    shell, dropped = _topological_shell(component.vertices, component.faces)
+    if not component.watertight:
+        return shell, False, dropped
+
+    # The shell is sewn and manifold by construction, so ShapeFix_Shell and
+    # ShapeFix_Solid have nothing to find -- and on a 45k-triangle mesh they
+    # cost about 37 seconds between them.  Worse, ShapeFix_Solid silently
+    # drops geometry when handed anything unusual.  Build the solid directly.
+    shell.Closed(True)
+    maker = BRepBuilderAPI_MakeSolid(shell)
+    if not maker.IsDone():
+        return shell, False, dropped
+
+    solid = maker.Solid()
+    if _volume(solid) < 0.0:
+        # Inward-facing shell: flip it rather than run a repair pass.
+        solid = TopoDS.Solid_s(solid.Reversed())
+    return solid, True, dropped
+
+
 def mesh_to_shape(mesh: MeshData, merge_coplanar: bool = True) -> MeshBuildResult:
-    """Turn a cleaned mesh into a STEP-ready solid (or a shell, if it is open)."""
-    shell, dropped = _topological_shell(mesh.vertices, mesh.faces)
+    """Turn a cleaned mesh into STEP-ready solids (or shells, if it is open)."""
     notes: list[str] = []
+    components = mesh.components or [
+        MeshComponent(mesh.vertices, mesh.faces, mesh.watertight, mesh.volume)
+    ]
+
+    shapes: list[TopoDS_Shape] = []
+    dropped = 0
+    all_solid = True
+    open_pieces = 0
+    for component in components:
+        shape, is_solid, lost = _component_shape(component)
+        shapes.append(shape)
+        dropped += lost
+        if not is_solid:
+            all_solid = False
+            open_pieces += 1
+
     if dropped:
         notes.append(f"dropped {dropped} degenerate triangle(s)")
+    if open_pieces:
+        notes.append(
+            f"{open_pieces} of {len(components)} piece(s) not watertight; "
+            "exported as open shell(s)"
+        )
+    if len(components) > 1:
+        notes.append(f"mesh is {len(components)} disconnected pieces; one solid each")
 
-    faces_before = _count_faces(shell)
-
-    shape: TopoDS_Shape = shell
-    is_solid = False
-    if mesh.watertight:
-        # The shell is already sewn and manifold by construction, so
-        # ShapeFix_Shell and ShapeFix_Solid have nothing to find -- and on a
-        # 45k-triangle mesh they cost about 37 seconds between them.  Build the
-        # solid directly and only reach for ShapeFix if the check below fails.
-        shell.Closed(True)
-        maker = BRepBuilderAPI_MakeSolid(shell)
-        if maker.IsDone():
-            solid = maker.Solid()
-            if _volume(solid) < 0.0:
-                # Inward-facing shell: flip it rather than run a repair pass.
-                solid = TopoDS.Solid_s(solid.Reversed())
-            shape = solid
-            is_solid = True
-        else:
-            notes.append("MakeSolid failed; exported as an open shell")
+    if len(shapes) == 1:
+        shape: TopoDS_Shape = shapes[0]
     else:
-        notes.append("mesh is not watertight; exported as an open shell")
+        builder = BRep_Builder()
+        compound = TopoDS_Compound()
+        builder.MakeCompound(compound)
+        for piece in shapes:
+            builder.Add(compound, piece)
+        shape = compound
 
-    volume_before = _volume(shape) if is_solid else float("nan")
+    faces_before = _count_faces(shape)
+    volume_before = _volume(shape) if all_solid else float("nan")
 
     if merge_coplanar:
         merged = unify_same_domain(shape)
         if not merged.IsNull():
             shape = merged
 
-    volume_after = _volume(shape) if is_solid else float("nan")
+    volume_after = _volume(shape) if all_solid else float("nan")
 
     valid = bool(BRepCheck_Analyzer(shape).IsValid())
     if not valid:
         # Some Menagerie visual meshes have non-manifold edges -- a few edges
-        # shared by three or four triangles -- which OCC rejects.  ShapeFix
-        # resolves them without dropping faces; only keep its answer if it
-        # actually helped.
+        # shared by three or four triangles -- which OCC rejects.  ShapeFix can
+        # resolve those, but it is also capable of quietly discarding geometry,
+        # so its answer is only accepted if the volume survives intact.
         fixer = ShapeFix_Shape(shape)
         fixer.Perform()
         fixed = fixer.Shape()
         if not fixed.IsNull() and BRepCheck_Analyzer(fixed).IsValid():
-            shape = fixed
-            valid = True
-            if is_solid:
-                volume_after = _volume(shape)
-            notes.append("ShapeFix repaired non-manifold edges")
+            fixed_volume = _volume(fixed) if all_solid else float("nan")
+            lost_volume = (
+                all_solid
+                and np.isfinite(volume_after)
+                and volume_after != 0
+                and abs(fixed_volume - volume_after) / abs(volume_after) > 1e-6
+            )
+            if lost_volume:
+                notes.append(
+                    f"ShapeFix would have changed the volume by "
+                    f"{abs(fixed_volume - volume_after) / abs(volume_after):.1%}; rejected"
+                )
+            else:
+                shape = fixed
+                valid = True
+                volume_after = fixed_volume
+                notes.append("ShapeFix repaired non-manifold edges")
+
     return MeshBuildResult(
         shape=shape,
-        is_solid=is_solid,
+        is_solid=all_solid,
         valid=valid,
         faces_before=faces_before,
         faces_after=_count_faces(shape),
+        n_components=len(components),
         volume_before_merge=volume_before,
         volume_after_merge=volume_after,
         dropped_triangles=dropped,
         notes=notes,
     )
+
+
+# -- parallel building -----------------------------------------------------
+#
+# The 35 mesh geoms of the G1 are independent of one another and took 522 s of
+# the 25-minute export, on one of four cores.  TopoDS_Shape cannot be pickled,
+# so workers hand their result back as a .brep file.  That round trip keeps the
+# topology exactly (same face count, same component count) and the geometry to
+# within a couple of ULP, since .brep writes coordinates as decimal text; a
+# test asserts the parallel and serial paths agree to 1e-12 relative.
+
+
+@dataclass
+class _BuildMeta:
+    """The picklable half of :class:`MeshBuildResult`."""
+
+    is_solid: bool
+    valid: bool
+    faces_before: int
+    faces_after: int
+    n_components: int
+    volume_before_merge: float
+    volume_after_merge: float
+    dropped_triangles: int
+    notes: list[str]
+
+    @staticmethod
+    def of(result: "MeshBuildResult") -> "_BuildMeta":
+        return _BuildMeta(
+            result.is_solid,
+            result.valid,
+            result.faces_before,
+            result.faces_after,
+            result.n_components,
+            result.volume_before_merge,
+            result.volume_after_merge,
+            result.dropped_triangles,
+            list(result.notes),
+        )
+
+    def with_shape(self, shape: TopoDS_Shape) -> "MeshBuildResult":
+        return MeshBuildResult(
+            shape=shape,
+            is_solid=self.is_solid,
+            valid=self.valid,
+            faces_before=self.faces_before,
+            faces_after=self.faces_after,
+            n_components=self.n_components,
+            volume_before_merge=self.volume_before_merge,
+            volume_after_merge=self.volume_after_merge,
+            dropped_triangles=self.dropped_triangles,
+            notes=list(self.notes),
+        )
+
+
+_WORKER: dict = {}
+
+
+def _worker_init(xml_path: str) -> None:  # pragma: no cover - subprocess
+    import mujoco
+
+    _WORKER["model"] = mujoco.MjModel.from_xml_path(xml_path)
+
+
+def _worker_build(args):  # pragma: no cover - subprocess
+    import os
+    import tempfile
+
+    from OCP.BRepTools import BRepTools
+
+    geom_id, scale, decimate, merge_coplanar = args
+    mesh = extract_mesh(_WORKER["model"], geom_id, scale=scale, decimate=decimate)
+    result = mesh_to_shape(mesh, merge_coplanar=merge_coplanar)
+    handle, path = tempfile.mkstemp(suffix=".brep")
+    os.close(handle)
+    BRepTools.Write_s(result.shape, path)
+    return geom_id, mesh, _BuildMeta.of(result), path
+
+
+def _read_brep(path: str) -> TopoDS_Shape:
+    from OCP.BRepTools import BRepTools
+
+    shape = TopoDS_Shape()
+    BRepTools.Read_s(shape, path, BRep_Builder())
+    return shape
+
+
+def build_meshes(
+    model: mujoco.MjModel,
+    xml_path: str,
+    geom_ids: list[int],
+    *,
+    scale: float,
+    decimate: float | None,
+    merge_coplanar: bool,
+    jobs: int = 1,
+    progress=None,
+) -> tuple[dict[int, tuple[MeshData, MeshBuildResult]], list[str]]:
+    """Convert every mesh geom, in parallel when asked and when it is worth it."""
+    out: dict[int, tuple[MeshData, MeshBuildResult]] = {}
+    warnings: list[str] = []
+    if not geom_ids:
+        return out, warnings
+
+    if jobs > 1 and len(geom_ids) > 1:
+        try:
+            return _build_meshes_parallel(
+                xml_path,
+                geom_ids,
+                scale=scale,
+                decimate=decimate,
+                merge_coplanar=merge_coplanar,
+                jobs=jobs,
+                progress=progress,
+            )
+        except Exception as exc:
+            # Falling back is about what this machine can do, not about
+            # correctness: the serial path below produces identical shapes,
+            # which the test suite checks.
+            warnings.append(
+                f"parallel mesh build unavailable ({type(exc).__name__}: {exc}); "
+                "built serially"
+            )
+
+    for geom_id in geom_ids:
+        if progress is not None:
+            progress(f"mesh geom {geom_id}")
+        mesh = extract_mesh(model, geom_id, scale=scale, decimate=decimate)
+        out[geom_id] = (mesh, mesh_to_shape(mesh, merge_coplanar=merge_coplanar))
+    return out, warnings
+
+
+def _build_meshes_parallel(
+    xml_path: str,
+    geom_ids: list[int],
+    *,
+    scale: float,
+    decimate: float | None,
+    merge_coplanar: bool,
+    jobs: int,
+    progress=None,
+):
+    import multiprocessing as mp
+    import os
+
+    out: dict[int, tuple[MeshData, MeshBuildResult]] = {}
+    context = mp.get_context("fork" if hasattr(os, "fork") else "spawn")
+    tasks = [(g, scale, decimate, merge_coplanar) for g in geom_ids]
+    done = 0
+    with context.Pool(
+        processes=min(jobs, len(geom_ids)), initializer=_worker_init, initargs=(xml_path,)
+    ) as pool:
+        for geom_id, mesh, meta, path in pool.imap_unordered(_worker_build, tasks):
+            try:
+                out[geom_id] = (mesh, meta.with_shape(_read_brep(path)))
+            finally:
+                try:
+                    os.unlink(path)
+                except OSError:  # pragma: no cover
+                    pass
+            done += 1
+            if progress is not None:
+                progress(f"meshes {done}/{len(geom_ids)}")
+    return out, []

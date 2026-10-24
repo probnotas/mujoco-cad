@@ -130,6 +130,69 @@ Separately, several meshes have edges shared by **three or four** triangles
 `ShapeFix_Shape` runs as a fallback when `BRepCheck_Analyzer` fails; it repairs
 them without dropping a single face.
 
+### One mesh is not always one solid
+
+Four G1 visual meshes are several disconnected pieces stored as a single mesh:
+
+| mesh | pieces |
+|---|---|
+| `left_hip_roll_link` | 2 |
+| `right_hip_roll_link` | 2 |
+| `left_knee_link` | 8 |
+| `right_knee_link` | 8 |
+
+Every edge is perfectly manifold (`{2: 5763}` for the hip roll) -- the pieces
+simply are not joined. A `TopoDS_Solid` is one outer shell plus optional inner
+voids, so handing it several disjoint outer shells gives a solid that
+`BRepCheck_Analyzer` rejects and whose volume STEP reads back short, the extra
+shells having been taken for cavities. The shortfalls were 12.54%, 12.54%,
+1.26% and 5.34% -- exactly the volume of the pieces being lost.
+
+`ShapeFix_Solid` made it worse rather than better: handed the two-piece hip
+roll it returned a *valid* solid with 12.5% less volume, having quietly
+discarded a piece. Its repairs are now only accepted when the volume survives.
+
+Building one solid per connected component and collecting them in a compound
+fixes all four, to machine precision:
+
+| mesh | pieces | volume vs trimesh |
+|---|---|---|
+| `left_hip_roll_link` | 2 | 4.6e-16 |
+| `right_hip_roll_link` | 2 | 1.8e-15 |
+| `left_knee_link` | 8 | 8.2e-16 |
+| `right_knee_link` | 8 | 4.1e-15 |
+
+The reason this was not caught earlier is worth recording: **no test under 25
+minutes touched the mesh path at all.** `humanoid.xml` is entirely primitives,
+so the only mesh coverage was the full G1 export. `tests/conftest.py` now
+builds a small mesh MJCF on the fly -- one closed component, one mesh holding
+two disconnected boxes, one open surface -- and `tests/test_meshes.py` runs
+against it in about 3 seconds.
+
+### `mesh_vert` is float32
+
+`model.mesh_vert` is single precision, so a mesh volume can only match an exact
+analytic answer to ~1e-7 relative. Comparisons against *trimesh* are exact,
+because both sides start from the same float32 vertices; comparisons against a
+closed form need `rtol=1e-6`.
+
+### Where the 25 minutes went
+
+From `report.json` on the first complete G1 run:
+
+| phase | seconds | share |
+|---|---|---|
+| build (mesh -> B-rep) | 522 | 48% |
+| write `assembly.step` | 222 | 21% |
+| write `parts/` | 195 | 18% |
+| `preview.glb` | 139 | 13% |
+
+The build is 35 independent meshes on one of four cores, so `--jobs` now runs
+them in a process pool. `TopoDS_Shape` cannot be pickled, so workers return a
+`.brep` file; that round trip preserves topology exactly and geometry to within
+a couple of ULP (it is a decimal text format), and a test asserts the parallel
+and serial paths agree to 1e-12 relative.
+
 ## Bugs found while building
 
 **CadQuery copies a sub-assembly when you add it.** Adding a parent to the

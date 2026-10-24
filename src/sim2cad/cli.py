@@ -46,6 +46,9 @@ def export(
     ),
     only: Optional[str] = typer.Option(None, help="Comma-separated body names to export."),
     out: Optional[str] = typer.Option(None, help="Output directory."),
+    jobs: int = typer.Option(
+        0, "--jobs", "-j", help="Processes for mesh conversion (0 = one per CPU, 1 = serial)."
+    ),
     parts: bool = typer.Option(True, "--parts/--no-parts", help="Write per-link STEP and STL."),
     preview: bool = typer.Option(True, "--preview/--no-preview", help="Write preview.glb."),
     render: bool = typer.Option(
@@ -88,6 +91,7 @@ def export(
             keep_root_pose=keep_root_pose,
             only=only_list,
             out=out,
+            jobs=jobs,
             write_parts=parts,
             write_preview=preview,
             write_render=render,

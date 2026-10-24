@@ -37,7 +37,7 @@ from .geoms import (
     primitive_solid,
 )
 from .load import LoadedModel, body_names, geom_names
-from .meshes import MeshBuildResult, MeshData, extract_mesh, mesh_to_shape
+from .meshes import MeshBuildResult, MeshData, build_meshes, extract_mesh, mesh_to_shape
 from .names import NameMap
 
 __all__ = ["PartGeom", "BodyNode", "RobotAssembly", "build_assembly", "JOINTS_NODE"]
@@ -148,6 +148,7 @@ def build_assembly(
     decimate: float | None = None,
     joint_markers: bool = True,
     only: list[str] | str | None = None,
+    jobs: int = 1,
     progress=None,
 ) -> RobotAssembly:
     """Convert the selected geoms into a nested :class:`cadquery.Assembly`."""
@@ -171,6 +172,27 @@ def build_assembly(
         order = [b for b in subtree if b in keep]
     else:
         order = list(subtree)
+
+    # Mesh geoms are the expensive part and are independent of one another,
+    # so convert them all up front, optionally across several processes.
+    mesh_geoms = [
+        g
+        for body in order
+        if wanted is None or body in wanted
+        for g in selection.by_body.get(body, [])
+        if int(model.geom_type[g]) == int(mujoco.mjtGeom.mjGEOM_MESH)
+    ]
+    built_meshes, mesh_warnings = build_meshes(
+        model,
+        str(lm.xml_path),
+        mesh_geoms,
+        scale=scale,
+        decimate=decimate,
+        merge_coplanar=merge_coplanar,
+        jobs=jobs,
+        progress=progress,
+    )
+    notes.extend(mesh_warnings)
 
     nodes: dict[int, BodyNode] = {}
     for body in order:
@@ -212,8 +234,7 @@ def build_assembly(
                     geom_class=classify_geom(model, geom).value,
                 )
             elif gtype == int(mujoco.mjtGeom.mjGEOM_MESH):
-                mesh = extract_mesh(model, geom, scale=scale, decimate=decimate)
-                build = mesh_to_shape(mesh, merge_coplanar=merge_coplanar)
+                mesh, build = built_meshes[geom]
                 part = PartGeom(
                     geom_id=geom,
                     name=label,

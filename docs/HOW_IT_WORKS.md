@@ -125,7 +125,19 @@ and measure in CAD, and the file shrinks. It must not change the shape, so
 sim2cad records the volume before and after and the report shows the
 difference, which is zero.
 
-Not every mesh survives as a solid: 15 of the G1's 35 visual meshes have
+**One mesh is not always one solid.** Four of the G1's visual meshes are
+several separate pieces saved in a single file -- `right_knee_link` is eight.
+A B-rep "solid" means *one* outer surface, optionally with hollow voids inside
+it. Give it two separate outer surfaces and the kernel assumes the second one
+must be a bubble inside the first, and subtracts it. That is exactly what
+happened: the hip-roll links came out 12.5% light, because the smaller of
+their two pieces was being counted as a hole rather than as more metal. The
+fix is to notice that the triangles form two disconnected groups and make two
+solids. A worked check: the two boxes in the test fixture are 80 mm and 40 mm
+on a side, so the right answer is 80³ + 40³ = 576,000 mm³; treat them as one
+solid and you get 80³ − 40³ = 448,000 mm³ instead.
+
+Not every mesh survives as a solid either: 15 of the G1's 35 visual meshes have
 genuine holes or non-manifold edges in the original art. Those are exported as
 open **shells** instead, flagged in the report, and repaired enough that
 OpenCascade still calls them valid.

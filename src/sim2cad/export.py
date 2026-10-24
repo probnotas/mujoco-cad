@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -149,12 +150,15 @@ def run_export(
     write_parts: bool = True,
     write_preview: bool = True,
     write_render: bool = True,
+    jobs: int = 0,
     progress=None,
 ) -> ExportResult:
     """Run the whole pipeline and write everything into ``out``."""
     if units not in UNIT_SCALE:
         raise ValueError(f"unknown unit {units!r}; expected mm or m")
     scale = UNIT_SCALE[units]
+    if jobs <= 0:
+        jobs = os.cpu_count() or 1
     timings: dict[str, float] = {}
 
     def step(label: str):
@@ -187,6 +191,7 @@ def run_export(
         decimate=decimate,
         joint_markers=joint_markers,
         only=only,
+        jobs=jobs,
         progress=progress,
     )
     timings["build"] = time.perf_counter() - t0
@@ -213,6 +218,7 @@ def run_export(
             "ground": ground,
             "keep_root_pose": keep_root_pose,
             "only": only,
+            "jobs": jobs,
         },
     )
     result.warnings.extend(robot.notes)

@@ -61,11 +61,28 @@ sim2cad export --mjcf path/to/model.xml
   --ground                       drop the robot so its lowest point is z=0
   --keep-root-pose               keep the sim's root pose
   --only BODY[,BODY...]          export a subset of links
+  --jobs N / -j N                processes for mesh conversion (0 = one per CPU)
   --out DIR
 
 sim2cad info     --menagerie unitree_g1   # bodies, joints, geoms, keyframes
 sim2cad validate out/<dir>                # re-run the checks on an export
 ```
+
+## Output size
+
+Sim meshes are dense, and STEP stores triangles as individual B-rep faces. The
+G1's 393,270 visual triangles come out as roughly a gigabyte of
+`assembly.step`, which is accurate but awkward to open. The levers, in the
+order worth trying:
+
+| lever | effect |
+|---|---|
+| `--decimate 0.25` | keeps a quarter of the triangles; shrinks file, build and validation together |
+| `--geoms collision` | the simplified collision set (219k triangles for the G1) rather than the detailed visual art |
+| `--only LINK[,LINK]` | one link and its ancestors, when you only need somewhere to bolt to |
+
+The default is full-fidelity `visual` geometry, because the point of this tool
+is that the dimensions are right.
 
 ## Accuracy
 
