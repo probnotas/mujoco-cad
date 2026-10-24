@@ -234,6 +234,25 @@ the CAD image uses exactly the camera maths we wrote down rather than a second
 implementation of it. If no GL context exists at all, the check skips rather
 than fails, as the PRD asks.
 
+## Known limitations
+
+- **`sim2cad validate` re-exports rather than measuring the files in place.**
+  It reloads the model and rebuilds the CAD so it can compare like with like,
+  which on the G1 means paying the full export cost again (~20 minutes) to
+  check files that already exist. The measurable checks (placement, volume,
+  validity, round trip) only need the written STEP plus a cheap
+  `extract_mesh` for the reference geometry -- about a minute -- while the
+  build-time facts (face counts before the merge, the merge's effect on
+  volume) would have to be carried forward from `report.json`. Worth doing;
+  not done yet.
+- **Writing and re-reading the STEP dominates a full-fidelity G1 export.**
+  Parallelising the build helps the largest single phase, but roughly a
+  gigabyte of STEP still has to be written once and read back once for
+  validation. Only `--decimate` or `--geoms collision` move that.
+- **`parts/` and `preview.glb` are still built serially**, 18% and 13% of the
+  export. Both are per-part and could use the same process pool as the mesh
+  build.
+
 ## Deliberate choices
 
 - **Validation reads the written file.** Placement and volume are measured by
