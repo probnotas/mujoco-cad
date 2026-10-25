@@ -61,6 +61,7 @@ sim2cad export --mjcf path/to/model.xml
   --ground                       drop the robot so its lowest point is z=0
   --keep-root-pose               keep the sim's root pose
   --only BODY[,BODY...]          export a subset of links
+  --printable                    also write slicer-ready STLs (always in mm)
   --jobs N / -j N                processes for mesh conversion (0 = one per CPU)
   --out DIR
 
@@ -88,6 +89,31 @@ a triangulated panel back into one flat face you can click on.
 
 The default is full-fidelity `visual` geometry, because the point of this tool
 is that the dimensions are right.
+
+## Printing
+
+`--printable` writes `printable/<link>.stl` alongside the CAD: each link
+repaired to a closed, manifold solid a slicer will accept, always in
+millimetres whatever `--units` says. Overlapping pieces of one link are fused;
+pieces that merely sit near each other are left as separate objects, because
+that is what they are.
+
+The repairs are reported per link, because some of them change the shape:
+
+| method | what happened |
+|---|---|
+| already watertight | nothing; the mesh was closed to begin with |
+| holes filled | boundary loops capped, geometry otherwise untouched |
+| meshfix per piece | non-manifold geometry stripped and holes closed |
+| ... + union | overlapping pieces of the link fused into one solid |
+
+**This prints a model, not a robot.** The parts are the links' outer
+envelopes: no wall thickness, no fasteners, no bearing seats, no motor
+pockets, and no actuators — so there is nothing to bolt together. What it is
+good for is a display model, a fit-check mock-up of a single link, or, most
+usefully, the dimensions: take the link lengths and joint axes from
+`joints.json` and design your own printable structure around them, and the
+MuJoCo model stays a valid testbed for whatever you build.
 
 ## Accuracy
 

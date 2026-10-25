@@ -108,6 +108,7 @@ class ValidationReport:
     warnings: list[str]
     timings: dict[str, float]
     options: dict[str, Any] = field(default_factory=dict)
+    printable: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
@@ -126,6 +127,7 @@ class ValidationReport:
             "bodies": self.body_table,
             "name_map": self.name_map,
             "files": self.files,
+            "printable": self.printable,
             "warnings": self.warnings,
             "timings": self.timings,
             "options": self.options,
@@ -462,6 +464,7 @@ def validate_export(result: ExportResult, run_round_trip: bool = True) -> Valida
         body_table=body_table,
         name_map=dict(robot.name_map.mapping),
         files=files,
+        printable=[p.as_dict() for p in result.printable],
         warnings=list(result.warnings),
         timings=dict(result.timings),
         options=dict(result.options),
@@ -704,6 +707,32 @@ def render_markdown(report: ValidationReport) -> str:
         types = ", ".join(f"{k}x{v}" for k, v in sorted(row["geoms"].items())) or "(none)"
         a(f"| {row['body']} | {row['parent']} | {row['n_parts']} | {types} |")
     a("")
+
+    if report.printable:
+        closed = sum(1 for p in report.printable if p["watertight"])
+        a("## Printable STLs")
+        a("")
+        a(
+            f"{closed} of {len(report.printable)} links came out closed and "
+            "sliceable. These are the links' outer envelopes -- no wall "
+            "thickness, fasteners or motor pockets -- so they print a model, "
+            "not a working robot."
+        )
+        a("")
+        a("| body | watertight | method | pieces | faces | volume mm^3 | note |")
+        a("|---|---|---|---|---|---|---|")
+        for p in report.printable:
+            pieces = (
+                f"{p['pieces_in']}"
+                if p["pieces_in"] == p["pieces_out"]
+                else f"{p['pieces_in']}→{p['pieces_out']}"
+            )
+            a(
+                f"| {p['body']} | {'yes' if p['watertight'] else '**no**'} | "
+                f"{p['method']} | {pieces} | {p['faces']} | {_fmt(p['volume_mm3'])} | "
+                f"{p['note'] or ''} |"
+            )
+        a("")
 
     files = report.files
     a("## Files")

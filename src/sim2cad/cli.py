@@ -51,6 +51,11 @@ def export(
     ),
     parts: bool = typer.Option(True, "--parts/--no-parts", help="Write per-link STEP and STL."),
     preview: bool = typer.Option(True, "--preview/--no-preview", help="Write preview.glb."),
+    printable: bool = typer.Option(
+        False,
+        "--printable",
+        help="Also write slicer-ready STLs (repaired to watertight, always in mm).",
+    ),
     render: bool = typer.Option(
         True, "--render/--no-render", help="Write side-by-side sim-vs-CAD PNGs (needs offscreen GL)."
     ),
@@ -95,6 +100,7 @@ def export(
             write_parts=parts,
             write_preview=preview,
             write_render=render,
+            printable=printable,
             progress=report,
         )
 
@@ -112,6 +118,11 @@ def export(
     if result.part_paths:
         console.print(f"  parts/         {len(result.part_paths)} STEP + {len(result.stl_paths)} STL")
     console.print(f"  joints.json    {len(result.robot.nodes)} bodies")
+    if result.printable:
+        closed = sum(1 for p in result.printable if p.watertight)
+        console.print(
+            f"  printable/     {closed}/{len(result.printable)} links closed and sliceable"
+        )
     if result.render_paths:
         console.print(f"  compare_*.png  {len(result.render_paths)} views")
     elif result.render_skipped_because:

@@ -38,6 +38,7 @@ class ExportResult:
     joints_path: Path | None = None
     preview_path: Path | None = None
     render_paths: dict[str, Path] = field(default_factory=dict)
+    printable: list = field(default_factory=list)
     render_skipped_because: str | None = None
     units: str = "mm"
     scale: float = 1000.0
@@ -150,6 +151,7 @@ def run_export(
     write_parts: bool = True,
     write_preview: bool = True,
     write_render: bool = True,
+    printable: bool = False,
     jobs: int = 0,
     progress=None,
 ) -> ExportResult:
@@ -218,6 +220,7 @@ def run_export(
             "ground": ground,
             "keep_root_pose": keep_root_pose,
             "only": only,
+            "printable": printable,
             "jobs": jobs,
         },
     )
@@ -264,6 +267,25 @@ def run_export(
             result.warnings.append(f"preview.glb failed: {type(exc).__name__}: {exc}")
             result.preview_path = None
         timings["preview"] = time.perf_counter() - t0
+
+    if printable:
+        t0 = step("writing printable STLs")
+        from .printable import write_printable
+
+        result.printable = write_printable(result)
+        timings["printable"] = time.perf_counter() - t0
+        open_after = [p for p in result.printable if not p.watertight]
+        if open_after:
+            result.warnings.append(
+                f"{len(open_after)} printable part(s) could not be closed: "
+                + ", ".join(p.body for p in open_after[:5])
+            )
+        lossy = [p for p in result.printable if p.lossy]
+        if lossy:
+            result.warnings.append(
+                f"{len(lossy)} printable part(s) were rebuilt rather than patched, so "
+                "their shape changed: " + ", ".join(p.body for p in lossy[:5])
+            )
 
     if write_render and result.preview_path is not None:
         t0 = step("rendering comparison images")

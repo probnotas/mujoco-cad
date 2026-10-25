@@ -24,6 +24,10 @@ sim2cad = "sim2cad.cli:app"
 render = [
     "pillow>=13.0.0",
 ]
+printable = [
+    "manifold3d>=3.5.4",
+    "pymeshfix>=0.18.1",
+]
 
 [dependency-groups]
 dev = ["pytest>=8.0", "pytest-xdist>=3.5"]
