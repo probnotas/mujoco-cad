@@ -48,6 +48,8 @@ class PrintablePart:
     faces: int
     volume_mm3: float
     volume_shift: float | None = None
+    dropped_slivers: int = 0
+    reasons: list[str] = field(default_factory=list)
     note: str = ""
 
     def as_dict(self) -> dict:
@@ -62,6 +64,8 @@ class PrintablePart:
             "faces": self.faces,
             "volume_mm3": self.volume_mm3,
             "volume_shift": self.volume_shift,
+            "dropped_slivers": self.dropped_slivers,
+            "reasons": self.reasons,
             "note": self.note,
         }
 
@@ -157,91 +161,140 @@ def _fill_holes(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     return patched
 
 
-def _meshfix(mesh: trimesh.Trimesh) -> trimesh.Trimesh | None:
-    """MeshFix: closes holes and strips non-manifold geometry."""
+def _meshfix(mesh: trimesh.Trimesh) -> tuple[trimesh.Trimesh | None, str | None]:
+    """MeshFix: closes holes and strips non-manifold geometry.
+
+    Returns ``(mesh, None)`` on success or ``(None, reason)`` on failure.  The
+    reason matters: the first version of this swallowed every exception, so a
+    wrong keyword argument in this very call looked exactly like a mesh that
+    could not be repaired, and the G1 reported thirteen unfixable links when
+    the repair had simply never run.
+    """
     try:
-        from pymeshfix import MeshFix
-    except Exception:  # pragma: no cover - optional extra
-        return None
+        import pymeshfix
+    except ImportError as exc:  # pragma: no cover - optional extra
+        return None, f"pymeshfix not installed ({exc})"
     try:
-        fixer = MeshFix(np.asarray(mesh.vertices, float), np.asarray(mesh.faces, np.int32))
-        fixer.repair(verbose=False)
-        if len(fixer.f) == 0:
-            return None
-        return trimesh.Trimesh(vertices=fixer.v, faces=fixer.f, process=True)
-    except Exception:  # pragma: no cover - MeshFix gives up on some inputs
-        return None
+        verts, faces = pymeshfix.clean_from_arrays(
+            np.asarray(mesh.vertices, dtype=float),
+            np.asarray(mesh.faces, dtype=np.int32),
+        )
+    except Exception as exc:
+        return None, f"MeshFix raised {type(exc).__name__}: {exc}"
+    if len(faces) == 0:
+        return None, "MeshFix returned an empty mesh"
+    out = trimesh.Trimesh(vertices=verts, faces=faces, process=True)
+    if not out.is_watertight:
+        return None, "MeshFix output was still open"
+    return out, None
 
 
-def _voxel_remesh(mesh: trimesh.Trimesh, divisions: int = 192) -> trimesh.Trimesh | None:
+def _voxel_remesh(
+    mesh: trimesh.Trimesh, divisions: int = 192
+) -> tuple[trimesh.Trimesh | None, str | None]:
     """Last resort: re-surface the volume on a grid.
 
     Guaranteed closed, and visibly lossy -- sharp edges round off at the grid
     pitch -- so it is only reached when everything gentler has failed, and it
     is always reported.
     """
+    diagonal = float(np.linalg.norm(mesh.extents))
+    if diagonal <= 0:
+        return None, "piece has no extent"
     try:
-        diagonal = float(np.linalg.norm(mesh.extents))
-        if diagonal <= 0:
-            return None
-        pitch = diagonal / divisions
-        filled = mesh.voxelized(pitch=pitch).fill()
+        filled = mesh.voxelized(pitch=diagonal / divisions).fill()
         out = filled.marching_cubes
-        out.merge_vertices()
-        out.fix_normals()
-        return out if out.is_watertight else None
-    except Exception:  # pragma: no cover - voxelisation can run out of memory
-        return None
+    except ImportError as exc:  # pragma: no cover - needs scikit-image
+        return None, f"voxel remesh unavailable ({exc})"
+    except Exception as exc:  # pragma: no cover - can exhaust memory
+        return None, f"voxel remesh raised {type(exc).__name__}: {exc}"
+    out.merge_vertices()
+    out.fix_normals()
+    if not out.is_watertight:
+        return None, "voxel remesh output was still open"
+    return out, None
 
 
-def make_printable(mesh: trimesh.Trimesh) -> tuple[trimesh.Trimesh, str, bool, float | None]:
+#: A closed surface needs at least a tetrahedron.  Anything smaller is a
+#: stray sliver that no repair can turn into a solid.
+MIN_FACES_FOR_SOLID = 4
+
+
+def make_printable(
+    mesh: trimesh.Trimesh,
+) -> tuple[trimesh.Trimesh, str, bool, float | None, int, list[str]]:
     """Repair towards watertight, gently first.
 
-    Returns the mesh, the method that worked, whether it changed the shape
-    materially, and the relative volume shift where that can be measured.
+    Returns the mesh, the method that worked, whether the shape was rebuilt
+    rather than patched, the relative volume shift where measurable, how many
+    sliver pieces were discarded, and the reasons any rung was needed or
+    failed.
     """
+    reasons: list[str] = []
     if mesh.is_watertight:
-        return mesh, "already watertight", False, 0.0
+        return mesh, "already watertight", False, 0.0, 0, reasons
 
-    reference = None
-    if mesh.is_volume:  # pragma: no cover - rare for an open mesh
-        reference = float(mesh.volume)
+    reference = float(mesh.volume) if mesh.is_volume else None
 
     patched = _fill_holes(mesh)
     if patched.is_watertight:
-        shift = _shift(reference, patched)
-        return patched, "holes filled", False, shift
+        return patched, "holes filled", False, _shift(reference, patched), 0, reasons
 
     # Repair each piece on its own: MeshFix keeps only the largest shell when
-    # it is handed several at once, which would quietly delete parts of a link.
-    pieces = _components(mesh)
+    # handed several at once, which would quietly delete parts of a link.
     repaired: list[trimesh.Trimesh] = []
-    any_meshfix = False
-    for piece in pieces:
+    dropped = 0
+    used_meshfix = False
+    used_voxel = False
+
+    for index, piece in enumerate(_components(mesh)):
         if piece.is_watertight:
             repaired.append(piece)
             continue
+
+        if len(piece.faces) < MIN_FACES_FOR_SOLID:
+            # A one- or two-triangle fragment cannot enclose anything; the G1's
+            # left_shoulder_roll_link carries three of them.  Dropping is the
+            # only honest outcome, so long as it is said out loud.
+            dropped += 1
+            continue
+
         filled = _fill_holes(piece)
         if filled.is_watertight:
             repaired.append(filled)
             continue
-        fixed = _meshfix(piece)
-        if fixed is not None and fixed.is_watertight:
+
+        fixed, why = _meshfix(piece)
+        if fixed is not None:
             repaired.append(fixed)
-            any_meshfix = True
+            used_meshfix = True
             continue
-        voxelised = _voxel_remesh(piece)
+        reasons.append(f"piece {index}: {why}")
+
+        voxelised, why = _voxel_remesh(piece)
         if voxelised is not None:
             repaired.append(voxelised)
-            any_meshfix = True
+            used_voxel = True
             continue
-        repaired.append(piece)  # keep it; it will be reported as not watertight
+        reasons.append(f"piece {index}: {why}")
+
+        repaired.append(piece)  # kept, and reported as not watertight
+
+    if not repaired:
+        return mesh, "nothing printable", False, None, dropped, reasons
 
     combined = trimesh.util.concatenate(repaired) if len(repaired) > 1 else repaired[0]
     combined.merge_vertices()
     combined.fix_normals()
-    method = "meshfix per piece" if any_meshfix else "holes filled per piece"
-    return combined, method, any_meshfix, _shift(reference, combined)
+
+    if used_voxel:
+        method = "voxel remesh per piece"
+    elif used_meshfix:
+        method = "meshfix per piece"
+    else:
+        method = "holes filled per piece"
+    lossy = used_voxel or used_meshfix
+    return combined, method, lossy, _shift(reference, combined), dropped, reasons
 
 
 def _shift(reference: float | None, mesh: trimesh.Trimesh) -> float | None:
@@ -295,7 +348,7 @@ def write_printable(result, out_dir: Path | None = None) -> list[PrintablePart]:
             continue
 
         pieces_in = len(_components(mesh))
-        repaired, method, lossy, shift = make_printable(mesh)
+        repaired, method, lossy, shift, dropped, reasons = make_printable(mesh)
         fused, _, pieces_out = _union_overlapping(repaired)
         if fused is not repaired:
             method += " + union"
@@ -308,6 +361,9 @@ def write_printable(result, out_dir: Path | None = None) -> list[PrintablePart]:
             note = "still open after repair; a slicer will have to guess"
         elif lossy:
             note = "geometry was rebuilt, not just patched; check the shape"
+        if dropped:
+            sliver = f"dropped {dropped} sliver piece(s) too small to be a solid"
+            note = f"{note}; {sliver}" if note else sliver
 
         report.append(
             PrintablePart(
@@ -321,6 +377,8 @@ def write_printable(result, out_dir: Path | None = None) -> list[PrintablePart]:
                 faces=int(len(fused.faces)),
                 volume_mm3=float(fused.volume) if fused.is_volume else float("nan"),
                 volume_shift=shift,
+                dropped_slivers=dropped,
+                reasons=reasons,
                 note=note,
             )
         )

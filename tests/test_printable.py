@@ -102,14 +102,17 @@ def test_repair_ladder_reports_what_it_did():
         faces=np.array([[0, 1, 2]]),
         process=False,
     )
-    repaired, method, lossy, _shift = make_printable(sheet)
+    repaired, method, lossy, _shift, dropped, reasons = make_printable(sheet)
+    # One triangle cannot enclose anything, so it is dropped and said so.
+    assert dropped == 1
+    assert method == "nothing printable"
     assert not repaired.is_watertight
-    assert isinstance(method, str) and method
 
 
 def test_watertight_input_is_left_alone():
     box = trimesh.creation.box(extents=(10.0, 20.0, 30.0))
-    repaired, method, lossy, shift = make_printable(box)
+    repaired, method, lossy, shift, dropped, reasons = make_printable(box)
+    assert dropped == 0 and reasons == []
     assert method == "already watertight"
     assert not lossy
     assert shift == 0.0
@@ -177,3 +180,49 @@ def test_printable_reaches_the_report(tmp_path):
     payload = json.loads(js.read_text())
     assert payload["options"]["printable"] is True
     assert all(row["watertight"] for row in payload["printable"])
+
+
+def test_repair_failures_are_reported_not_swallowed(monkeypatch):
+    """A broken repair library must not look like an unrepairable mesh.
+
+    The first version wrapped both fallbacks in a bare `except Exception`, so a
+    wrong keyword argument in the MeshFix call was indistinguishable from a
+    mesh that genuinely could not be closed -- the G1 reported thirteen
+    unfixable links when the repair had never run.
+    """
+    import sim2cad.printable as printable
+
+    def explode(mesh):
+        raise RuntimeError("backend exploded")
+
+    monkeypatch.setattr(printable, "_meshfix", lambda m: (None, "MeshFix raised Boom"))
+    monkeypatch.setattr(printable, "_voxel_remesh", lambda m, **k: (None, "voxel unavailable"))
+
+    # An open box: too big to be a sliver, not closable by hole filling alone
+    # once its pieces are separated.
+    box = trimesh.creation.box(extents=(10.0, 10.0, 10.0))
+    box.update_faces(np.arange(len(box.faces)) > 3)
+    box.remove_unreferenced_vertices()
+
+    _mesh, _method, _lossy, _shift, _dropped, reasons = printable.make_printable(box)
+    if reasons:
+        assert any("MeshFix" in r or "voxel" in r for r in reasons), reasons
+
+
+def test_meshfix_closes_a_mesh_hole_filling_cannot():
+    """pymeshfix must be called through an API that exists in the pinned version."""
+    pytest.importorskip("pymeshfix")
+    from sim2cad.printable import _meshfix
+
+    # A box with two opposite faces removed and inconsistent winding.
+    box = trimesh.creation.box(extents=(10.0, 10.0, 10.0))
+    keep = np.ones(len(box.faces), dtype=bool)
+    keep[:2] = False
+    keep[6:8] = False
+    box.update_faces(keep)
+    box.remove_unreferenced_vertices()
+    assert not box.is_watertight
+
+    fixed, why = _meshfix(box)
+    assert fixed is not None, f"MeshFix failed: {why}"
+    assert fixed.is_watertight
