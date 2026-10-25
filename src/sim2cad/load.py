@@ -51,6 +51,15 @@ class LoadedModel:
                 return i
         raise ValueError("model has no body attached to the world body")
 
+    def root_bodies(self) -> list[int]:
+        """Every body parented to ``world``.
+
+        A robot entry point normally has exactly one.  More than one means the
+        file holds a scene, or several robots, and we only export the first --
+        which is worth saying out loud rather than quietly dropping the rest.
+        """
+        return [i for i in range(1, self.model.nbody) if self.model.body_parentid[i] == 0]
+
     def subtree(self) -> list[int]:
         """Body ids of the robot root and all its descendants, parents first."""
         root = self.root_body

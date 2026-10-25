@@ -222,6 +222,17 @@ def run_export(
         },
     )
     result.warnings.extend(robot.notes)
+    roots = lm.root_bodies()
+    if len(roots) > 1:
+        from .load import body_names
+
+        names = body_names(lm.model)
+        result.warnings.append(
+            f"model has {len(roots)} bodies attached to the world; exporting only "
+            f"the subtree under {names[roots[0]]!r} and ignoring "
+            f"{', '.join(names[b] for b in roots[1:][:5])}"
+            + (" ..." if len(roots) > 6 else "")
+        )
     if selection.fallbacks:
         result.warnings.append(
             f"{len(selection.fallbacks)} bod(y|ies) had no {geoms} geoms and fell back "

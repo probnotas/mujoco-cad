@@ -279,6 +279,14 @@ than fails, as the PRD asks.
   Parallelising the build helps the largest single phase, but roughly a
   gigabyte of STEP still has to be written once and read back once for
   validation. Only `--decimate` or `--geoms collision` move that.
+- **Tendons and equality constraints are not exported.** The Panda has one of
+  each and the Shadow Hand has four tendons; they couple joints together for
+  control but are not part of the kinematic tree, so `joints.json` reports each
+  joint independently. A reader should not assume two tendon-coupled joints can
+  be driven separately on the real robot.
+- **Only the first body attached to `world` is exported.** A file holding a
+  robot *and* a table is a scene, not a robot; sim2cad takes the first subtree
+  and now says in the report which bodies it ignored.
 - **`parts/` and `preview.glb` are still built serially**, 18% and 13% of the
   export. Both are per-part and could use the same process pool as the mesh
   build.
