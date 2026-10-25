@@ -102,9 +102,13 @@ Every export runs the full check suite and writes the numbers into
   recorded anchor and axis, and it lands in the same place;
 - the coplanar merge changes no volume (**3.5e-14** relative on the G1).
 
-A full G1 export takes about 16 minutes and produces roughly a gigabyte of
+A full G1 export takes about 11 minutes and produces roughly a gigabyte of
 STEP; see **Output size** above. Mesh conversion runs one process per core by
 default (`--jobs`).
+
+The same checks pass on the Franka Panda (fixed base, serial chain, sliding
+gripper), ANYmal C (free base, four legs) and the Shadow Hand (26 bodies, five
+branches) -- see `tests/test_generality.py`, which runs under `--run-slow`.
 
 Measurements are taken by re-opening the written `assembly.step`, so the frame
 maths, the STEP write and the STEP read are all inside the loop being tested.

@@ -230,6 +230,19 @@ ANYmal's worst centroid went from 1.33 mm to 4.0e-10 mm, and its open shells
 dropped from 19 to 15 -- splitting at non-manifold edges made four pieces
 watertight that had not been.
 
+On the G1 the same change is a strict improvement, and a faster one:
+
+| | before | after |
+|---|---|---|
+| export, wall | 15 m 51 s | **11 m 03 s** |
+| mesh build | 65 s | **41 s** |
+| parts needing a ShapeFix repair | several | **none** |
+| open shells | 15 of 35 | 12 of 35 |
+| worst centroid / bbox / volume | 1.1e-10 / 1.0e-10 / 3.7e-13 | unchanged |
+
+Every piece is now manifold by construction, so the repair pass never fires.
+It is kept as a safety net for meshes these robots do not happen to contain.
+
 The fast fixture now contains two boxes meeting at a single corner vertex, and
 the tests cover all three rows of that table, so the gap that let the
 incomplete rule look correct is closed.
@@ -261,7 +274,7 @@ From `report.json`, before and after parallelising the mesh build:
 | write `assembly.step` | 222 s | 204 s |
 | write `parts/` | 195 s | 158 s |
 | `preview.glb` | 139 s | 144 s |
-| whole export, wall | 25 m 10 s | **15 m 51 s** |
+| whole export, wall | 25 m 10 s | **15 m 51 s** (11 m 03 s once the component splitting was fixed) |
 
 The build is 35 independent meshes and was running on one of four cores, so
 `--jobs` now runs them in a process pool. `TopoDS_Shape` cannot be pickled, so
