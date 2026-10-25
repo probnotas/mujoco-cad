@@ -63,6 +63,17 @@ def test_components_split_at_a_shared_vertex():
     assert len(joined) == 1
 
 
+def test_components_split_at_a_non_manifold_edge():
+    """Three faces on one edge cannot sit in a single shell either.
+
+    OpenCascade rejects such a shell and splits it on writing STEP, duplicating
+    geometry exactly as it does for a vertex-only join, so the split has to
+    happen here instead.  Only an edge shared by exactly two faces joins them.
+    """
+    three_on_an_edge = np.array([[0, 1, 2], [1, 2, 3], [1, 2, 4]])
+    assert len(connected_components(three_on_an_edge)) == 3
+
+
 def test_vertex_joined_mesh_round_trips_through_step(mesh_model, tmp_path):
     """The ANYmal thigh bug, reproduced on two boxes touching at one corner."""
     import cadquery as cq

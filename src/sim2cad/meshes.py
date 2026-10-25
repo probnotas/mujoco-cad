@@ -132,14 +132,21 @@ def connected_components(faces: np.ndarray) -> list[np.ndarray]:
 
     order = np.lexsort((edges[:, 1], edges[:, 0]))
     edges, owners = edges[order], owners[order]
-    shared = np.all(edges[1:] == edges[:-1], axis=1)
-    rows, cols = owners[:-1][shared], owners[1:][shared]
+
+    # Link two faces only across an edge they alone share.  A boundary edge
+    # (one face) joins nothing, and a non-manifold edge (three or more) cannot
+    # sit inside a single shell either -- OpenCascade rejects such a shell and
+    # splits it when writing STEP, which is the same fault as the vertex case.
+    starts = np.flatnonzero(
+        np.r_[True, np.any(edges[1:] != edges[:-1], axis=1)]
+    )
+    run_lengths = np.diff(np.r_[starts, len(edges)])
+    manifold = starts[run_lengths == 2]
+    rows, cols = owners[manifold], owners[manifold + 1]
 
     if len(rows) == 0:
         return [np.array([i]) for i in range(n_faces)]
 
-    # Linking consecutive owners of equal edges is enough: an edge shared by
-    # three or more faces still ends up in one component, transitively.
     adjacency = coo_matrix(
         (np.ones(len(rows), dtype=np.int8), (rows, cols)), shape=(n_faces, n_faces)
     )
