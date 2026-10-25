@@ -305,6 +305,16 @@ def _volume(shape: TopoDS_Shape) -> float:
     return float(props.Mass())
 
 
+def _area(shape: TopoDS_Shape) -> float:
+    """Total surface area -- the only size an open shell has."""
+    from OCP.BRepGProp import BRepGProp
+    from OCP.GProp import GProp_GProps
+
+    props = GProp_GProps()
+    BRepGProp.SurfaceProperties_s(shape, props)
+    return float(props.Mass())
+
+
 def _count_faces(shape: TopoDS_Shape) -> int:
     from OCP.TopExp import TopExp_Explorer
     from OCP.TopAbs import TopAbs_FACE
@@ -392,29 +402,42 @@ def mesh_to_shape(mesh: MeshData, merge_coplanar: bool = True) -> MeshBuildResul
     if not valid:
         # Some Menagerie visual meshes have non-manifold edges -- a few edges
         # shared by three or four triangles -- which OCC rejects.  ShapeFix can
-        # resolve those, but it is also capable of quietly discarding geometry,
-        # so its answer is only accepted if the volume survives intact.
+        # resolve those, but it is also capable of quietly discarding geometry.
+        # Volume is the sharper guard where there is one; an open shell has no
+        # volume, so its surface area has to stand in.  Rejecting the repair
+        # outright over a small area change would only swap one failure for
+        # another -- the part would stay invalid -- so a change that is not
+        # outright destructive is recorded and left for the placement check,
+        # which measures the surface centroid and sees exactly this.
+        area_before = _area(shape)
         fixer = ShapeFix_Shape(shape)
         fixer.Perform()
         fixed = fixer.Shape()
         if not fixed.IsNull() and BRepCheck_Analyzer(fixed).IsValid():
             fixed_volume = _volume(fixed) if all_solid else float("nan")
-            lost_volume = (
-                all_solid
-                and np.isfinite(volume_after)
-                and volume_after != 0
-                and abs(fixed_volume - volume_after) / abs(volume_after) > 1e-6
+            volume_shift = (
+                abs(fixed_volume - volume_after) / abs(volume_after)
+                if all_solid and np.isfinite(volume_after) and volume_after != 0
+                else 0.0
             )
-            if lost_volume:
+            area_shift = (
+                abs(_area(fixed) - area_before) / area_before if area_before > 0 else 0.0
+            )
+            if volume_shift > 1e-6:
                 notes.append(
-                    f"ShapeFix would have changed the volume by "
-                    f"{abs(fixed_volume - volume_after) / abs(volume_after):.1%}; rejected"
+                    f"ShapeFix would have changed the volume by {volume_shift:.1%}; rejected"
                 )
             else:
                 shape = fixed
                 valid = True
                 volume_after = fixed_volume
-                notes.append("ShapeFix repaired non-manifold edges")
+                if area_shift > 1e-6:
+                    notes.append(
+                        f"ShapeFix repaired non-manifold edges and moved "
+                        f"{area_shift:.2%} of the surface"
+                    )
+                else:
+                    notes.append("ShapeFix repaired non-manifold edges")
 
     return MeshBuildResult(
         shape=shape,
