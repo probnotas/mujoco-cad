@@ -104,36 +104,56 @@ class MeshData:
         return len(self.components)
 
 
-def connected_components(faces: np.ndarray, n_vertices: int) -> list[np.ndarray]:
-    """Face-index arrays, one per connected piece of the mesh.
+def connected_components(faces: np.ndarray) -> list[np.ndarray]:
+    """Face-index arrays, one per connected piece, joined along shared **edges**.
 
-    Connectivity is through shared vertices, which is what decides whether
-    OpenCascade can treat the pieces as a single shell.
+    Vertex connectivity is the wrong notion here.  Two patches that meet at a
+    single vertex and share no edge cannot be one ``TopoDS_Shell``: OpenCascade
+    splits them when writing STEP and duplicates the faces that bridge them, so
+    the file comes back with more surface than it was given.  The ANYmal thigh
+    has exactly that shape -- a 14-triangle patch attached to a 1494-triangle
+    body at vertices only -- and the round trip gained those 14 faces and
+    3,320 mm^2 of area.
     """
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components as _cc
 
-    if len(faces) == 0:
+    n_faces = len(faces)
+    if n_faces == 0:
         return []
-    rows = faces[:, [0, 1, 2]].ravel()
-    cols = faces[:, [1, 2, 0]].ravel()
+
+    # Every triangle's three edges, each stored with its endpoints sorted so
+    # the two faces either side of an edge produce identical keys.
+    edges = np.concatenate(
+        [faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]], axis=0
+    )
+    edges = np.sort(edges, axis=1)
+    owners = np.tile(np.arange(n_faces), 3)
+
+    order = np.lexsort((edges[:, 1], edges[:, 0]))
+    edges, owners = edges[order], owners[order]
+    shared = np.all(edges[1:] == edges[:-1], axis=1)
+    rows, cols = owners[:-1][shared], owners[1:][shared]
+
+    if len(rows) == 0:
+        return [np.array([i]) for i in range(n_faces)]
+
+    # Linking consecutive owners of equal edges is enough: an edge shared by
+    # three or more faces still ends up in one component, transitively.
     adjacency = coo_matrix(
-        (np.ones(len(rows), dtype=np.int8), (rows, cols)),
-        shape=(n_vertices, n_vertices),
+        (np.ones(len(rows), dtype=np.int8), (rows, cols)), shape=(n_faces, n_faces)
     )
     count, labels = _cc(adjacency, directed=False)
     if count == 1:
-        return [np.arange(len(faces))]
-    face_labels = labels[faces[:, 0]]
-    groups = [np.nonzero(face_labels == i)[0] for i in range(count)]
-    return [g for g in groups if len(g)]
+        return [np.arange(n_faces)]
+    return [np.nonzero(labels == i)[0] for i in range(count)]
 
 
 def _split_components(mesh: trimesh.Trimesh) -> list[MeshComponent]:
     vertices = np.asarray(mesh.vertices, dtype=float)
     faces = np.asarray(mesh.faces, dtype=np.int64)
     out: list[MeshComponent] = []
-    for group in connected_components(faces, len(vertices)):
+    for group in connected_components(faces):
         sub_faces = faces[group]
         used = np.unique(sub_faces)
         remap = np.full(len(vertices), -1, dtype=np.int64)

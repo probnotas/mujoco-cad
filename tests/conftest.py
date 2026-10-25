@@ -69,6 +69,16 @@ def mesh_model(tmp_path_factory) -> Path:
     small.apply_translation([0.30, 0.0, 0.0])
     trimesh.util.concatenate([big, small]).export(assets / "twopiece.stl")
 
+    # Two boxes meeting at exactly one shared corner vertex: connected if you
+    # ask about vertices, two separate shells if you ask about edges.  This is
+    # the ANYmal thigh's shape, and OpenCascade cannot put it in one shell.
+    a = trimesh.creation.box(extents=(0.06, 0.06, 0.06))
+    b = trimesh.creation.box(extents=(0.06, 0.06, 0.06))
+    b.apply_translation([0.06, 0.06, 0.06])
+    corner = trimesh.util.concatenate([a, b])
+    corner.merge_vertices()
+    corner.export(assets / "corner.stl")
+
     # A box with its top face taken out, so it is open until something fills
     # it.  Select by centroid rather than by face index: trimesh does not
     # promise that faces 0 and 1 are the two halves of one side.
@@ -85,6 +95,7 @@ def mesh_model(tmp_path_factory) -> Path:
     <mesh name="single" file="single.stl"/>
     <mesh name="twopiece" file="twopiece.stl"/>
     <mesh name="opened" file="open.stl"/>
+    <mesh name="corner" file="corner.stl"/>
   </asset>
   <worldbody>
     <body name="base" pos="0 0 1">
@@ -96,6 +107,10 @@ def mesh_model(tmp_path_factory) -> Path:
         <body name="tip" pos="0 0 0.25" euler="20 0 45">
           <joint name="wrist" type="hinge" axis="1 0 0" range="-45 45"/>
           <geom name="g_open" type="mesh" mesh="opened" contype="0" conaffinity="0" group="2"/>
+          <body name="corner" pos="0 0.2 0" euler="0 15 10">
+            <joint name="knuckle" type="hinge" axis="0 1 0" range="-30 30"/>
+            <geom name="g_corner" type="mesh" mesh="corner" contype="0" conaffinity="0" group="2"/>
+          </body>
         </body>
       </body>
     </body>

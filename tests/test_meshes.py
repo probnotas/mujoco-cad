@@ -38,12 +38,60 @@ def _load(path):
 def test_connected_components_counts_pieces():
     # Two triangles sharing an edge are one piece; a third apart is another.
     faces = np.array([[0, 1, 2], [2, 1, 3], [4, 5, 6]])
-    groups = connected_components(faces, 7)
+    groups = connected_components(faces)
     assert len(groups) == 2
     assert sorted(len(g) for g in groups) == [1, 2]
 
-    one = connected_components(np.array([[0, 1, 2]]), 3)
+    one = connected_components(np.array([[0, 1, 2]]))
     assert len(one) == 1 and len(one[0]) == 1
+
+
+def test_components_split_at_a_shared_vertex():
+    """Sharing one vertex is not sharing an edge, and shells need edges.
+
+    OpenCascade cannot represent two vertex-joined patches as a single shell:
+    it splits them when writing STEP and duplicates the bridging faces, so the
+    file comes back with more surface than it was handed.
+    """
+    # Two triangles meeting only at vertex 2.
+    faces = np.array([[0, 1, 2], [2, 3, 4]])
+    groups = connected_components(faces)
+    assert len(groups) == 2, "a shared vertex must not merge two pieces"
+
+    # Sharing a full edge does merge them.
+    joined = connected_components(np.array([[0, 1, 2], [1, 2, 3]]))
+    assert len(joined) == 1
+
+
+def test_vertex_joined_mesh_round_trips_through_step(mesh_model, tmp_path):
+    """The ANYmal thigh bug, reproduced on two boxes touching at one corner."""
+    import cadquery as cq
+    from cadquery.occ_impl.exporters.assembly import exportAssembly
+
+    from sim2cad.occunits import cascade_unit
+    from sim2cad.stepread import count_faces, read_step_assembly, surface_centroid
+
+    lm = _load(mesh_model)
+    mesh = extract_mesh(lm.model, _geom(lm, "g_corner"), scale=1000.0)
+    assert mesh.n_components == 2, "the two boxes share a vertex, not an edge"
+
+    build = mesh_to_shape(mesh)
+    written_faces = count_faces(build.shape)
+    _, written_area = surface_centroid(build.shape)
+
+    assembly = cq.Assembly(name="t")
+    assembly.add(cq.Shape.cast(build.shape), name="corner")
+    path = tmp_path / "corner.step"
+    with cascade_unit("MM"):
+        exportAssembly(assembly, str(path), unit="MM")
+
+    node, _ = next(read_step_assembly(str(path), unit="MM").leaves())
+    _, read_area = surface_centroid(node.shape)
+    assert count_faces(node.shape) == written_faces, "STEP gained or lost faces"
+    assert np.isclose(read_area, written_area, rtol=1e-12), "STEP changed the surface"
+
+    # Two 60 mm cubes: 12 faces each after merging, and twice the volume.
+    assert np.isclose(build.volume_after_merge, 2 * 60**3, rtol=1e-6)
 
 
 def test_single_component_mesh_is_one_exact_solid(mesh_model):

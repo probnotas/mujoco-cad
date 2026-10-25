@@ -176,6 +176,40 @@ analytic answer to ~1e-7 relative. Comparisons against *trimesh* are exact,
 because both sides start from the same float32 vertices; comparisons against a
 closed form need `rtol=1e-6`.
 
+### A shell is joined by edges, not by vertices
+
+Testing beyond the G1 immediately paid for itself. The ANYmal C failed check
+3a with one part's surface centroid **1.33 mm** out -- while its bounding box
+(5.2e-10 mm) and volume (5.1e-13) were perfect. That combination is the whole
+argument for measuring the centroid as well: duplicated or coincident surface
+changes neither extent nor enclosed volume, so only the centroid can see it.
+
+The cause was in the multi-component splitting. `connected_components` grouped
+faces by **vertex** adjacency, but a `TopoDS_Shell` is joined along **edges**.
+The ANYmal thigh has a 14-triangle patch attached to its 1,494-triangle body at
+shared vertices only, never along a shared edge. OpenCascade cannot hold that
+in one shell, so on writing STEP it split the shell and duplicated the bridging
+faces: 1,817 faces went out and 1,831 came back, with 3,320 mm^2 of extra
+surface. That is a defect in the **written file**, not in the check.
+
+Ruling it out step by step was worth the trouble, because two earlier guesses
+were wrong:
+
+| suspect | verdict |
+|---|---|
+| my `ShapeFix` guard (volume is NaN for shells, so repairs are accepted unchecked) | wrong -- ShapeFix never ran on this part |
+| the world transform, or mirroring on the left-side legs | wrong -- `det = +1`, MuJoCo and STEP agree to 1e-10 |
+| the reference centroid | wrong -- matches the predicted value to 0.000000 |
+| OCC's STEP reader healing the shell on import | wrong -- identical with healing on and off, and it is off by default |
+| the written STEP itself | **right** -- a BRep round trip of the same shape is exact, STEP is not |
+
+Splitting by edge adjacency gives `[1000, 494, 340, 14]` instead of
+`[340, 1508]`, and the STEP round trip is then byte-for-byte identical in face
+count and area. Note the 14: the piece that OpenCascade had been duplicating.
+
+The fast fixture now contains two boxes meeting at a single corner vertex,
+which reproduces it in milliseconds.
+
 ### `--merge-coplanar` buys almost nothing on the G1
 
 393,314 faces become 392,955: **0.09%**. The G1's visual meshes are organic,
