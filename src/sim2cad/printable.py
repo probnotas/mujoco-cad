@@ -48,6 +48,7 @@ class PrintablePart:
     faces: int
     volume_mm3: float
     volume_shift: float | None = None
+    bbox_drift: float = 0.0
     dropped_slivers: int = 0
     reasons: list[str] = field(default_factory=list)
     note: str = ""
@@ -64,6 +65,7 @@ class PrintablePart:
             "faces": self.faces,
             "volume_mm3": self.volume_mm3,
             "volume_shift": self.volume_shift,
+            "bbox_drift": self.bbox_drift,
             "dropped_slivers": self.dropped_slivers,
             "reasons": self.reasons,
             "note": self.note,
@@ -146,8 +148,16 @@ def body_mesh(node, scale: float) -> trimesh.Trimesh | None:
 
 
 def _components(mesh: trimesh.Trimesh) -> list[trimesh.Trimesh]:
+    """Split into connected pieces, **without** repairing them.
+
+    ``trimesh.Trimesh.split`` passes ``repair=True`` to ``submesh`` by
+    default, so it quietly fills holes while splitting: a ten-face open box
+    came back as a twelve-face closed one.  Pieces would then be recorded as
+    "already watertight" when something had just patched them.  Repairs belong
+    in the ladder below, where they are measured and reported.
+    """
     try:
-        pieces = mesh.split(only_watertight=False)
+        pieces = mesh.split(only_watertight=False, repair=False)
     except Exception:  # pragma: no cover - degenerate input
         return [mesh]
     return [p for p in pieces if len(p.faces)] or [mesh]
@@ -215,6 +225,23 @@ def _voxel_remesh(
     return out, None
 
 
+#: A repair may not move a piece's bounds by more than this fraction of its own
+#: size.  Dimensional accuracy is the entire product here: a closed shape that
+#: is the wrong shape is worse than an open one, because it looks fine.  The
+#: voxel remesh moved one G1 link's bounds by 79% and would otherwise have
+#: shipped as a clean, watertight, sliceable STL of something else.
+MAX_BBOX_DRIFT = 1e-3
+
+
+def _bbox_drift(before: trimesh.Trimesh, after: trimesh.Trimesh) -> float:
+    """How far a repair moved the bounds, relative to the part's own size."""
+    lo0, hi0 = before.bounds
+    lo1, hi1 = after.bounds
+    size = float(np.linalg.norm(hi0 - lo0))
+    moved = float(max(np.abs(lo1 - lo0).max(), np.abs(hi1 - hi0).max()))
+    return moved / size if size > 0 else 0.0
+
+
 #: A closed surface needs at least a tetrahedron.  Anything smaller is a
 #: stray sliver that no repair can turn into a solid.
 MIN_FACES_FOR_SOLID = 4
@@ -266,19 +293,25 @@ def make_printable(
 
         fixed, why = _meshfix(piece)
         if fixed is not None:
-            repaired.append(fixed)
-            used_meshfix = True
-            continue
+            drift = _bbox_drift(piece, fixed)
+            if drift <= MAX_BBOX_DRIFT:
+                repaired.append(fixed)
+                used_meshfix = True
+                continue
+            why = f"MeshFix moved the bounds by {drift:.1%}"
         reasons.append(f"piece {index}: {why}")
 
         voxelised, why = _voxel_remesh(piece)
         if voxelised is not None:
-            repaired.append(voxelised)
-            used_voxel = True
-            continue
+            drift = _bbox_drift(piece, voxelised)
+            if drift <= MAX_BBOX_DRIFT:
+                repaired.append(voxelised)
+                used_voxel = True
+                continue
+            why = f"voxel remesh moved the bounds by {drift:.1%}"
         reasons.append(f"piece {index}: {why}")
 
-        repaired.append(piece)  # kept, and reported as not watertight
+        repaired.append(piece)  # kept open, and reported as such
 
     if not repaired:
         return mesh, "nothing printable", False, None, dropped, reasons
@@ -353,6 +386,7 @@ def write_printable(result, out_dir: Path | None = None) -> list[PrintablePart]:
         if fused is not repaired:
             method += " + union"
 
+        drift = _bbox_drift(mesh, fused)
         path = out_dir / f"{node.safe_name}.stl"
         fused.export(path)
 
@@ -364,6 +398,9 @@ def write_printable(result, out_dir: Path | None = None) -> list[PrintablePart]:
         if dropped:
             sliver = f"dropped {dropped} sliver piece(s) too small to be a solid"
             note = f"{note}; {sliver}" if note else sliver
+        if drift > MAX_BBOX_DRIFT:
+            warn = f"bounds moved {drift:.2%} -- do not design against this part"
+            note = f"{note}; {warn}" if note else warn
 
         report.append(
             PrintablePart(
@@ -377,6 +414,7 @@ def write_printable(result, out_dir: Path | None = None) -> list[PrintablePart]:
                 faces=int(len(fused.faces)),
                 volume_mm3=float(fused.volume) if fused.is_volume else float("nan"),
                 volume_shift=shift,
+                bbox_drift=drift,
                 dropped_slivers=dropped,
                 reasons=reasons,
                 note=note,

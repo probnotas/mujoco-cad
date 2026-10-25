@@ -719,8 +719,11 @@ def render_markdown(report: ValidationReport) -> str:
             "not a working robot."
         )
         a("")
-        a("| body | watertight | method | pieces | faces | volume mm^3 | note |")
-        a("|---|---|---|---|---|---|---|")
+        a(
+            "| body | watertight | method | pieces | faces | volume mm^3 | "
+            "bounds moved | note |"
+        )
+        a("|---|---|---|---|---|---|---|---|")
         for p in report.printable:
             pieces = (
                 f"{p['pieces_in']}"
@@ -730,7 +733,7 @@ def render_markdown(report: ValidationReport) -> str:
             a(
                 f"| {p['body']} | {'yes' if p['watertight'] else '**no**'} | "
                 f"{p['method']} | {pieces} | {p['faces']} | {_fmt(p['volume_mm3'])} | "
-                f"{p['note'] or ''} |"
+                f"{_fmt(p.get('bbox_drift', 0.0))} | {p['note'] or ''} |"
             )
         a("")
 

@@ -226,3 +226,52 @@ def test_meshfix_closes_a_mesh_hole_filling_cannot():
     fixed, why = _meshfix(box)
     assert fixed is not None, f"MeshFix failed: {why}"
     assert fixed.is_watertight
+
+
+def test_a_repair_that_moves_the_bounds_is_rejected(monkeypatch):
+    """Dimensional accuracy outranks closing the mesh.
+
+    The voxel remesh moved one G1 link's bounds by 79% and would have shipped
+    as a clean watertight STL of a different shape -- worse than an open one,
+    because nothing about it looks wrong.
+    """
+    import sim2cad.printable as printable
+
+    box = trimesh.creation.box(extents=(10.0, 10.0, 10.0))
+    keep = np.ones(len(box.faces), dtype=bool)
+    keep[:2] = False
+    box.update_faces(keep)
+    box.remove_unreferenced_vertices()
+    assert not box.is_watertight
+
+    # A "repair" that returns something twice the size.
+    def inflate(mesh):
+        blown = trimesh.creation.box(extents=(20.0, 20.0, 20.0))
+        return blown, None
+
+    # Hole filling would close this box on its own, so stub it out to reach
+    # the rung under test.
+    monkeypatch.setattr(printable, "_fill_holes", lambda m: m.copy())
+    monkeypatch.setattr(printable, "_meshfix", inflate)
+    monkeypatch.setattr(printable, "_voxel_remesh", lambda m, **k: (None, "disabled"))
+
+    mesh, method, lossy, _shift, _dropped, reasons = printable.make_printable(box)
+    assert not mesh.is_watertight, "an inflated repair must not be accepted"
+    assert any("moved the bounds" in r for r in reasons), reasons
+
+
+def test_bbox_drift_is_measured_and_reported(tmp_path):
+    result = run_export(
+        mjcf="tests/data/humanoid.xml",
+        out=str(tmp_path / "out"),
+        printable=True,
+        write_render=False,
+    )
+    for part in result.printable:
+        assert part.bbox_drift < printable_tolerance(), (part.body, part.bbox_drift)
+
+
+def printable_tolerance() -> float:
+    from sim2cad.printable import MAX_BBOX_DRIFT
+
+    return MAX_BBOX_DRIFT
