@@ -98,14 +98,26 @@ millimetres whatever `--units` says. Overlapping pieces of one link are fused;
 pieces that merely sit near each other are left as separate objects, because
 that is what they are.
 
-The repairs are reported per link, because some of them change the shape:
+**No repair is accepted if it moves the part's dimensions.** A repair must
+keep the link's bounds within 0.1% of its own size or it is refused and the
+link is left open, with the reason recorded. A closed shape that is the wrong
+shape is worse than an open one, because nothing about the file looks wrong:
+on the G1 the voxel fallback wanted to move three hip links' bounds by 117%,
+117% and 585%, and all three were refused.
+
+The repairs are reported per link, along with how far the bounds moved:
 
 | method | what happened |
 |---|---|
 | already watertight | nothing; the mesh was closed to begin with |
 | holes filled | boundary loops capped, geometry otherwise untouched |
 | meshfix per piece | non-manifold geometry stripped and holes closed |
+| voxel remesh per piece | surface rebuilt on a grid; lossy, and usually refused |
 | ... + union | overlapping pieces of the link fused into one solid |
+
+On the G1, 25 of 30 links come out closed, every one of them dimensionally
+exact (bounds within 3e-8 of the CAD). The other five say why they could not
+be closed. Fifteen stray single-triangle slivers are dropped and counted.
 
 **This prints a model, not a robot.** The parts are the links' outer
 envelopes: no wall thickness, no fasteners, no bearing seats, no motor

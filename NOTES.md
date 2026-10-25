@@ -335,6 +335,43 @@ the CAD image uses exactly the camera maths we wrote down rather than a second
 implementation of it. If no GL context exists at all, the check skips rather
 than fails, as the PRD asks.
 
+## `--printable`, and three bugs that hid behind each other
+
+Closing meshes for a slicer took four attempts, and each failure was invisible
+in a different way.
+
+1. **The repair ladder had never run.** `MeshFix.repair()` takes no `verbose`
+   argument in pymeshfix 0.18.1; the call raised `TypeError` and a bare
+   `except Exception: return None` reported it as "this mesh cannot be
+   repaired". The G1 declared thirteen unfixable links with total confidence.
+   The voxel fallback was equally dead, needing `scikit-image`, which was not
+   installed. Both failures now carry a reason into the report: a broken
+   backend and an unrepairable mesh are different answers.
+
+2. **The voxel fallback shipped a wrong shape.** Once it ran, it closed
+   `right_hip_pitch_link` into a watertight, sliceable STL whose bounds were
+   **137 mm out -- 79% of the part**. Nothing in the file would have said so.
+   Every repair is now refused unless it keeps the bounds within 0.1% of the
+   part's size. On the current G1 the voxel rung wants 117%, 117% and 585% on
+   three hip links, and is refused each time.
+
+3. **Splitting was secretly repairing.** `trimesh.Trimesh.split` passes
+   `repair=True` to `submesh` by default, so it filled holes while splitting:
+   a ten-face open box came back twelve-face and closed. Pieces were being
+   recorded as "already watertight" when something had just patched them,
+   which inflated the closed count from a true 25 to a reported 28.
+
+What they have in common is testing around the code instead of through it.
+Eight tests passed while the function they existed to cover was dead, because
+none of them called it; earlier, nine passed while `--printable` crashed on
+every real export, because none called `validate_export`. The tests now call
+`_meshfix` directly and assert it closes a mesh hole filling cannot, build and
+write a full report, and check that an inflated repair is refused.
+
+Result on the G1: 25 of 30 links closed, maximum bounds drift **3.1e-08**,
+fifteen single-triangle slivers dropped and counted, five links left open with
+their reasons recorded.
+
 ## Known limitations
 
 - **`sim2cad validate` re-exports rather than measuring the files in place.**
