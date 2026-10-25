@@ -203,12 +203,36 @@ were wrong:
 | OCC's STEP reader healing the shell on import | wrong -- identical with healing on and off, and it is off by default |
 | the written STEP itself | **right** -- a BRep round trip of the same shape is exact, STEP is not |
 
-Splitting by edge adjacency gives `[1000, 494, 340, 14]` instead of
-`[340, 1508]`, and the STEP round trip is then byte-for-byte identical in face
-count and area. Note the 14: the piece that OpenCascade had been duplicating.
+**The exact rule took two attempts, and the first one looked right.** The
+hypothesis was verified against trimesh's `face_adjacency`, which splits
+`[1000, 494, 340, 14]` and round-trips through STEP unchanged. The first
+implementation linked faces across *any* shared edge -- a different rule --
+and left the thigh whole at `[340, 1508]`, so the 1.33 mm error came back
+unchanged on the next run. The unit test added alongside it passed, because it
+only covered the vertex case.
 
-The fast fixture now contains two boxes meeting at a single corner vertex,
-which reproduces it in milliseconds.
+Two faces belong to the same shell only if they share an edge that **exactly
+those two** faces share:
+
+| edge is shared by | meaning | joins? |
+|---|---|---|
+| 1 face | a boundary edge | no |
+| 2 faces | manifold | **yes** |
+| 3+ faces | non-manifold | no |
+
+A non-manifold edge cannot sit inside one shell any more than a vertex-only
+join can; OpenCascade rejects the shell and splits it on write either way.
+With that rule the thigh splits `[1000, 494, 340, 14]`, the STEP round trip is
+identical in face count and area, and the part is valid without ShapeFix at
+all. Note the 14: the piece that was being duplicated.
+
+ANYmal's worst centroid went from 1.33 mm to 4.0e-10 mm, and its open shells
+dropped from 19 to 15 -- splitting at non-manifold edges made four pieces
+watertight that had not been.
+
+The fast fixture now contains two boxes meeting at a single corner vertex, and
+the tests cover all three rows of that table, so the gap that let the
+incomplete rule look correct is closed.
 
 ### `--merge-coplanar` buys almost nothing on the G1
 
