@@ -27,6 +27,7 @@ render = [
 printable = [
     "manifold3d>=3.5.4",
     "pymeshfix>=0.18.1",
+    "scikit-image>=0.26.0",
 ]
 
 [dependency-groups]
